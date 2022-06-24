@@ -1274,6 +1274,21 @@ void xocl_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr)
 {
 
 }
+#elif LINUX_VERSION_CODE > KERNEL_VERSION(5, 17, 0)
+int xocl_gem_prime_vmap(struct drm_gem_object *obj, struct iosys_map *map)
+{
+	struct drm_xocl_bo *xobj = to_xocl_bo(obj);
+
+	BO_ENTER("xobj %p", xobj);
+	iosys_map_set_vaddr(map, xobj->vmapping);
+
+	return 0;
+}
+
+void xocl_gem_prime_vunmap(struct drm_gem_object *obj, struct iosys_map *map)
+{
+
+}
 #else
 int xocl_gem_prime_vmap(struct drm_gem_object *obj, struct dma_buf_map *map)
 {

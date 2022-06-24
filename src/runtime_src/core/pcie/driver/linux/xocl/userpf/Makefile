@@ -56,7 +56,6 @@ xocl-y := \
 	../xocl_debug.o \
 	../xocl_xgq.o \
 	../subdev/xdma.o \
-	../subdev/qdma.o \
 	../subdev/feature_rom.o \
 	../subdev/mailbox.o \
 	../subdev/xvc.o \
@@ -88,7 +87,6 @@ xocl-y := \
 	../subdev/intc.o \
 	../subdev/m2m.o \
 	../subdev/version_ctrl.o \
-	../subdev/msix_xdma.o \
 	../subdev/ert_user.o \
 	../subdev/accel_deadlock_detector.o \
 	../subdev/command_queue.o \

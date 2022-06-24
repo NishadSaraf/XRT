@@ -14,35 +14,7 @@
 #
 ccflags-y	+= -D_QDMA_DEBUGFS_
 
-xocl_lib-y	:= ../lib/libxdma.o
-
-xocl_lib-y	+=  \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/libqdma_config.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/libqdma_export.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_context.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_debugfs.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_debugfs_dev.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_debugfs_queue.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_descq.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_device.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_intr.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_mbox.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_platform.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_regs.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_sriov.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_st_c2h.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_thread.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/thread.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/xdev.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/qdma_access_common.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/qdma_list.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/qdma_mbox_protocol.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/qdma_resource_mgmt.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/eqdma_soft_access/eqdma_soft_access.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/eqdma_soft_access/eqdma_soft_reg_dump.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/qdma_soft_access/qdma_soft_access.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/qdma_s80_hard_access/qdma_s80_hard_access.o \
-		../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_access/qdma_s80_hard_access/qdma_s80_hard_reg_dump.o
+# xocl_lib-y	:= ../lib/libxdma.o
 
 libfdt-y	:= ../lib/libfdt/fdt.o		\
 		../lib/libfdt/fdt_addresses.o	\

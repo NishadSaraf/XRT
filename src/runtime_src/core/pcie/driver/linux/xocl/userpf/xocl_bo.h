@@ -198,6 +198,9 @@ struct drm_gem_object *xocl_gem_prime_import_sg_table(struct drm_device *dev,
 #if LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0) && !defined(RHEL_8_5_GE)
 void *xocl_gem_prime_vmap(struct drm_gem_object *obj);
 void xocl_gem_prime_vunmap(struct drm_gem_object *obj, void *vaddr);
+#elif LINUX_VERSION_CODE > KERNEL_VERSION(5, 17, 0)
+int xocl_gem_prime_vmap(struct drm_gem_object *obj, struct iosys_map *map);
+void xocl_gem_prime_vunmap(struct drm_gem_object *obj, struct iosys_map *map);
 #else
 int xocl_gem_prime_vmap(struct drm_gem_object *obj, struct dma_buf_map *map);
 void xocl_gem_prime_vunmap(struct drm_gem_object *obj, struct dma_buf_map *map);

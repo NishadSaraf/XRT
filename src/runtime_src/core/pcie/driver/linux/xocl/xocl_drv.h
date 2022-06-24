@@ -63,6 +63,7 @@
 #include "kds_core.h"
 #include "xclerr_int.h"
 #include "ps_kernel.h"
+#include "xocl_pci_compat.h"
 #if defined(RHEL_RELEASE_CODE)
 #if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(8, 3)
 #include <linux/sched/signal.h>

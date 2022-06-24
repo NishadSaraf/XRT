@@ -974,7 +974,7 @@ dmaTest(const std::shared_ptr<xrt_core::device>& _dev, boost::property_tree::ptr
       continue;
 
     std::stringstream run_details;
-    size_t block_size = 16 * 1024 * 1024; // Default block size 16MB
+    size_t block_size = 256 * 1024 * 1024; // Default block size 16MB
 
     //check custom argument from user
     const auto& str_block_size = _ptTest.get<std::string>("block-size", "");
