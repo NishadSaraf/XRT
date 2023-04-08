@@ -150,6 +150,11 @@ clean:
 	../lib/*.o.ur-safe ../lib/libqdma*/*.o ../lib/libqdma*/.*.o.cmd \
 	../lib/libqdma*/*/*.o ../lib/libqdma*/*/.*.o.cmd \
 	../lib/libqdma*/*.o.ur-safe ../lib/libqdma*/*/*.o.ur-safe \
+	../lib/libqdma*/*/*.o ../lib/libqdma*/*/.*.o.cmd \
+	../lib/libqdma/QDMA/linux-kernel/driver/libqdma/*.o ../lib/libqdma/QDMA/linux-kernel/driver/libqdma/.*.o.cmd \
+	../lib/libqdma/QDMA/linux-kernel/driver/libqdma/*/*.o ../lib/libqdma/QDMA/linux-kernel/driver/libqdma/*/.*.o.cmd \
+	../lib/libqdma/QDMA/linux-kernel/driver/libqdma/*/*/*.o ../lib/libqdma/QDMA/linux-kernel/driver/libqdma/*/*/.*.o.cmd \
+	../lib/libqdma*/*.o.ur-safe ../lib/libqdma*/*/*.o.ur-safe \
 	../subdev/*.o.ur-safe ./.cache.mk	\
 	$(common_dir)/*.o $(common_dir)/.*.o.cmd \
 	.tmp_versions *.symvers modules.order

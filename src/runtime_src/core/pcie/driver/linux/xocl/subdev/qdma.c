@@ -16,52 +16,42 @@
  * GNU General Public License for more details.
  */
 
-#include <linux/version.h>
+#include <linux/bitfield.h>
+#include <linux/completion.h>
+#include <linux/dma/amd_qdma.h>
+#include <linux/dmaengine.h>
 #include <linux/eventfd.h>
-#include <linux/debugfs.h>
-#include <linux/anon_inodes.h>
-#include <linux/dma-buf.h>
-#include <linux/aio.h>
-#include <linux/uio.h>
-#include <linux/slab.h>
+#include <linux/jiffies.h>
+#include <linux/kernel.h>
+#include <linux/module.h>
+#include <linux/pci.h>
+#include <linux/pci_regs.h>
+#include <linux/platform_data/amd_qdma.h>
+#include <linux/platform_device.h>
+
 #include "../xocl_drv.h"
 #include "../xocl_drm.h"
-#include "../lib/libqdma/QDMA/linux-kernel/driver/libqdma/libqdma_export.h"
-#include "../lib/libqdma/QDMA/linux-kernel/driver/libqdma/qdma_ul_ext.h"
-#include "qdma_ioctl.h"
 
-#define XOCL_FILE_PAGE_OFFSET   0x100000
-#ifndef VM_RESERVED
-#define VM_RESERVED (VM_DONTEXPAND | VM_DONTDUMP)
-#endif
+#define QDMA_MAX_USER_INTR			16
+#define QDMA_REQ_TIMEOUT_MS			10000
+#define QDMA_MAX_MM_CHANNELS			1
+#define QDMA_HW_MAX_MM_CHANNELS			16
 
-#define	MM_QUEUE_LEN		8
-#define	MM_EBUF_LEN		256
+#define AMD_PCIE_READ_RQ_SIZE			512
+#define AMD_PCIE_QDMA_ADDR_CAP_SIZE		64 /* bits */
+#define AMD_PCIE_QDMA_BAR_IDENTIFIER		0x1FD3
+#define AMD_PCIE_QDMA_BAR_IDENTIFIER_REGOFF	0x0
+#define AMD_PCIE_QDMA_BAR_IDENTIFIER_MASK	GENMASK(31, 16)
 
-#define MM_DEFAULT_RINGSZ_IDX	0
-
-#define	MINOR_NAME_MASK		0xffffffff
-
-#define QDMA_MAX_INTR		16
-#define QDMA_USER_INTR_MASK	0xffff
-
-#define QDMA_QSETS_MAX		256
-#define QDMA_QSETS_BASE		0
-
-#define QDMA_REQ_TIMEOUT_MS	10000
+#define AMD_QDMA_DEVICE_NAME			"amd-qdma"
+#define AMD_QDMA_DEV_NUM_RES			2U
 
 /* Module Parameters */
-unsigned int qdma_max_channel = 8;
+unsigned int qdma_max_channel = QDMA_MAX_MM_CHANNELS;
 module_param(qdma_max_channel, uint, 0644);
 MODULE_PARM_DESC(qdma_max_channel, "Set number of channels for qdma, default is 8");
 
-static unsigned int qdma_interrupt_mode = DIRECT_INTR_MODE;
-module_param(qdma_interrupt_mode, uint, 0644);
-MODULE_PARM_DESC(interrupt_mode, "0:auto, 1:poll, 2:direct, 3:intr_ring, default is 2");
-
 struct dentry *qdma_debugfs_root;
-
-static dev_t	str_dev;
 
 struct qdma_irq {
 	struct eventfd_ctx	*event_ctx;
@@ -69,45 +59,43 @@ struct qdma_irq {
 	bool			enabled;
 	irq_handler_t		handler;
 	void			*arg;
+	u32			user_irq;
 };
 
-enum {
-	QUEUE_STATE_INITIALIZED,
-	QUEUE_STATE_CLEANUP,
+struct qdma_channel {
+	struct dma_chan		*chan;
+	dma_cookie_t		dma_cookie;
+	u64			usage;
+	void			*dma_hdl;
+	struct completion	req_compl;
 };
 
 struct xocl_qdma {
 	unsigned long 		dma_hndl;
-	struct qdma_dev_conf	dev_conf;
 
 	struct platform_device	*pdev;
+	struct platform_device	*dma_pdev;
+
 	/* Number of bidirectional channels */
 	u32			channel;
-	/* Semaphore, one for each direction */
+	/*
+	 * Semaphore, one for each direction.
+	 * 0 index implies C2H, 1 implies H2C
+	 */
 	struct semaphore	channel_sem[2];
 	/*
 	 * Channel usage bitmasks, one for each direction
 	 * bit 1 indicates channel is free, bit 0 indicates channel is free
 	 */
 	volatile unsigned long	channel_bitmap[2];
-
-	struct mm_channel	*chans[2];
-
+	struct qdma_channel	chans[2][QDMA_HW_MAX_MM_CHANNELS];
 	struct mutex		str_dev_lock;
 
 	u16			instance;
 
-	struct qdma_irq		user_msix_table[QDMA_MAX_INTR];
+	struct qdma_irq		*user_msix_table;
 	u32			user_msix_mask;
 	spinlock_t		user_msix_table_lock;
-};
-
-struct mm_channel {
-	struct device		dev;
-	struct xocl_qdma	*qdma;
-	unsigned long		queue;
-	struct qdma_queue_conf	qconf;
-	uint64_t		total_trans_bytes;
 };
 
 static u32 get_channel_count(struct platform_device *pdev);
@@ -135,133 +123,6 @@ static void dump_sgtable(struct device *dev, struct sg_table *sgt)
 }
 
 /* sysfs */
-#define	__SHOW_MEMBER(P, M)		off += snprintf(buf + off, 64,		\
-	"%s:%lld\n", #M, (int64_t)P->M)
-
-static ssize_t qinfo_show(struct device *dev, struct device_attribute *da,
-	char *buf)
-{
-	struct mm_channel *channel = dev_get_drvdata(dev);
-	int off = 0;
-	struct qdma_queue_conf *qconf;
-
-	qconf = &channel->qconf;
-	__SHOW_MEMBER(qconf, pipe);
-	__SHOW_MEMBER(qconf, irq_en);
-	__SHOW_MEMBER(qconf, desc_rng_sz_idx);
-	__SHOW_MEMBER(qconf, wb_status_en);
-	__SHOW_MEMBER(qconf, cmpl_status_acc_en);
-	__SHOW_MEMBER(qconf, cmpl_status_pend_chk);
-	__SHOW_MEMBER(qconf, desc_bypass);
-	__SHOW_MEMBER(qconf, pfetch_en);
-	__SHOW_MEMBER(qconf, st_pkt_mode);
-	__SHOW_MEMBER(qconf, cmpl_rng_sz_idx);
-	__SHOW_MEMBER(qconf, cmpl_desc_sz);
-	__SHOW_MEMBER(qconf, cmpl_stat_en);
-	__SHOW_MEMBER(qconf, cmpl_udd_en);
-	__SHOW_MEMBER(qconf, cmpl_timer_idx);
-	__SHOW_MEMBER(qconf, cmpl_cnt_th_idx);
-	__SHOW_MEMBER(qconf, cmpl_trig_mode);
-	__SHOW_MEMBER(qconf, cmpl_en_intr);
-#if 0
-	__SHOW_MEMBER(qconf, cdh_max);
-	__SHOW_MEMBER(qconf, pipe_gl_max);
-	__SHOW_MEMBER(qconf, pipe_flow_id);
-	__SHOW_MEMBER(qconf, pipe_slr_id);
-	__SHOW_MEMBER(qconf, pipe_tdest);
-#endif
-	__SHOW_MEMBER(qconf, quld);
-	__SHOW_MEMBER(qconf, rngsz);
-	__SHOW_MEMBER(qconf, rngsz_cmpt);
-	__SHOW_MEMBER(qconf, c2h_bufsz);
-
-	return off;
-}
-static DEVICE_ATTR_RO(qinfo);
-
-static ssize_t stat_show(struct device *dev, struct device_attribute *da,
-			char *buf)
-{
-	int off = 0;
-#if 0
-	struct mm_channel *channel = dev_get_drvdata(dev);
-	struct qdma_queue_stats stat, *pstat;
-
-	if (qdma_queue_get_stats((unsigned long)channel->qdma->dma_handle,
-                                channel->queue, &stat) < 0)
-                return sprintf(buf, "Input invalid\n");
-
-        pstat = &stat;
-
-        __SHOW_MEMBER(pstat, pending_bytes);
-        __SHOW_MEMBER(pstat, pending_requests);
-        __SHOW_MEMBER(pstat, complete_bytes);
-        __SHOW_MEMBER(pstat, complete_requests);
-#endif
-        return off;
-}
-static DEVICE_ATTR_RO(stat);
-
-
-static struct attribute *queue_attributes[] = {
-	&dev_attr_stat.attr,
-	&dev_attr_qinfo.attr,
-	NULL,
-};
-
-static const struct attribute_group queue_attrgroup = {
-	.attrs = queue_attributes,
-};
-
-static void channel_sysfs_destroy(struct mm_channel *channel)
-{
-	if (get_device(&channel->dev)) {
-		sysfs_remove_group(&channel->dev.kobj, &queue_attrgroup);
-		put_device(&channel->dev);
-		device_unregister(&channel->dev);
-	}
-
-}
-
-static void device_release(struct device *dev)
-{
-	xocl_dbg(dev, "dummy device release callback");
-}
-
-static int channel_sysfs_create(struct mm_channel *channel)
-{
-	struct platform_device	*pdev = channel->qdma->pdev;
-	int			ret;
-	struct qdma_queue_conf *qconf = &channel->qconf;
-
-	channel->dev.parent = &pdev->dev;
-	channel->dev.release = device_release;
-	dev_set_drvdata(&channel->dev, channel);
-	dev_set_name(&channel->dev, "%sq%d",
-		qconf->q_type == Q_C2H ? "r" : "w",
-		qconf->qidx);
-	ret = device_register(&channel->dev);
-	if (ret) {
-		xocl_err(&pdev->dev, "device create failed");
-		goto failed;
-	}
-
-	ret = sysfs_create_group(&channel->dev.kobj, &queue_attrgroup);
-	if (ret) {
-		xocl_err(&pdev->dev, "create sysfs group failed");
-		goto failed;
-	}
-
-	return 0;
-
-failed:
-	if (get_device(&channel->dev)) {
-		put_device(&channel->dev);
-		device_unregister(&channel->dev);
-	}
-	return ret;
-}
-
 static ssize_t error_show(struct device *dev, struct device_attribute *da,
 	char *buf)
 {
@@ -281,8 +142,8 @@ static DEVICE_ATTR_RO(error);
 static ssize_t channel_stat_raw_show(struct device *dev,
 		        struct device_attribute *attr, char *buf)
 {
-	u32 i;
 	ssize_t nbytes = 0;
+	u32 i;
 	struct platform_device *pdev = to_platform_device(dev);
 	u32 chs = get_channel_count(pdev);
 
@@ -304,320 +165,252 @@ static struct attribute *qdma_attributes[] = {
 static const struct attribute_group qdma_attrgroup = {
 	.attrs = qdma_attributes,
 };
-
 /* end of sysfs */
 
-static void fill_qdma_request_sgl(struct qdma_request *req, struct sg_table *sgt)
+static void qdma_chan_irq(void *param)
 {
-	int i;
-	struct scatterlist *sg;
-	struct qdma_sw_sg *sgl = req->sgl;
-	unsigned int sgcnt = sgt->nents;
+	struct qdma_channel *chan = param;
 
-	req->sgcnt = sgcnt;
-	for_each_sg(sgt->sgl, sg, sgcnt, i) {
-		sgl->next = sgl + 1;
-		sgl->pg = sg_page(sg);
-		sgl->offset = sg->offset;
-		sgl->len = sg_dma_len(sg);
-		sgl->dma_addr = sg_dma_address(sg);
-		sgl++;
+	complete(&chan->req_compl);
+}
+
+static void qdma_print_sg_buf(struct platform_device *pdev,
+			      struct sg_table *sgt, u64 len)
+{
+	struct scatterlist *sg;
+	u32 i;
+
+	for_each_sg(sgt->sgl, sg, sg_nents(sgt->sgl), i) {
+		u32 j;
+		char *vaddr = sg_virt(sg);
+
+		for (j = 0; j < sg->length && len; j++, len--)
+			xocl_info(&pdev->dev, "%c", vaddr[j]);
 	}
-	req->sgl[sgcnt - 1].next = NULL;
+}
+
+static void qdma_zeroise_sg_buf(struct platform_device *pdev,
+				struct sg_table *sgt, u64 len)
+{
+	struct scatterlist *sg;
+	u32 i;
+
+	for_each_sg(sgt->sgl, sg, sg_nents(sgt->sgl), i) {
+		u32 j;
+		char *vaddr = sg_virt(sg);
+
+		for (j = 0; j < sg->length && len; j++, len--)
+			vaddr[j] = 0;
+	}
 }
 
 static ssize_t qdma_migrate_bo(struct platform_device *pdev,
-	struct sg_table *sgt, u32 write, u64 paddr, u32 channel, u64 len)
+			       struct sg_table *sgt, u32 dir, u64 paddr,
+			       u32 channel, u64 len)
 {
-	struct mm_channel *chan;
+	struct dma_async_tx_descriptor *tx;
+	enum dma_data_direction dma_dir;
+	struct dma_slave_config cfg;
+	struct qdma_channel *chan;
+	struct pci_dev *pci_dev;
 	struct xocl_qdma *qdma;
-	xdev_handle_t xdev;
-	struct qdma_request *req;
-	enum dma_data_direction dir;
-	u32 nents;
-	pid_t pid = current->pid;
 	ssize_t ret;
+	int nents;
 
 	qdma = platform_get_drvdata(pdev);
-	xocl_dbg(&pdev->dev, "TID %d, Channel:%d, Offset: 0x%llx, write: %d",
-		pid, channel, paddr, write);
-	xdev = xocl_get_xdev(pdev);
+	chan = &qdma->chans[dir][channel];
+	if (dir) {
+		cfg.direction = DMA_MEM_TO_DEV;
+		cfg.dst_addr = paddr;
+		dma_dir = DMA_TO_DEVICE;
+	} else {
+		cfg.direction = DMA_DEV_TO_MEM;
+		cfg.src_addr = paddr;
+		dma_dir = DMA_FROM_DEVICE;
+		qdma_zeroise_sg_buf(pdev, sgt, len);
+	}
 
-	chan = &qdma->chans[write][channel];
+	pci_dev = XDEV(xocl_get_xdev(pdev))->pdev;
 
-	dir = write ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
-	nents = dma_map_sg(&XDEV(xdev)->pdev->dev, sgt->sgl, sgt->orig_nents,
-			   dir);
-        if (!nents) {
-		xocl_err(&pdev->dev, "map sgl failed, sgt 0x%p.\n", sgt);
+	nents = pci_map_sg(pci_dev, sgt->sgl, sgt->orig_nents, dma_dir);
+	if (!nents) {
+		xocl_err(&pdev->dev, "Failed to map sg");
 		return -EIO;
 	}
-	sgt->nents = nents;
 
-	req = kzalloc(sizeof(struct qdma_request) +
-		      nents * sizeof(struct qdma_sw_sg),
-			GFP_KERNEL);
-	if (!req) {
-		xocl_err(&pdev->dev, "qdma req. OOM, sgl %u.\n", nents);
-		return -ENOMEM;
+	ret = dmaengine_slave_config(chan->chan, &cfg);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to config DMA: %ld", ret);
+		return ret;
 	}
-	req->write = write;
-	req->count = len;
-	req->ep_addr = paddr;
-	req->timeout_ms = QDMA_REQ_TIMEOUT_MS;
 
-	req->dma_mapped = 1;
-	req->sgl = (struct qdma_sw_sg *)(req + 1);
-	fill_qdma_request_sgl(req, sgt);
+	tx = dmaengine_prep_slave_sg(chan->chan, sgt->sgl, nents, cfg.direction,
+				     0);
+	if (!tx) {
+		xocl_err(&pdev->dev, "Failed to prep slave sg");
+		pci_unmap_sg(pci_dev, sgt->sgl, sgt->orig_nents, dir);
+		return -EIO;
+	}
 
-	ret = qdma_request_submit(qdma->dma_hndl, chan->queue, req);
+	tx->callback = qdma_chan_irq;
+	tx->callback_param = chan;
 
-	if (ret >= 0) {
-		chan->total_trans_bytes += ret;
-	} else  {
-		xocl_err(&pdev->dev, "DMA failed %ld, Dumping SG Page Table",
-			ret);
+	chan->dma_cookie = dmaengine_submit(tx);
+
+	dma_async_issue_pending(chan->chan);
+
+	ret = wait_for_completion_timeout(&chan->req_compl,
+					  msecs_to_jiffies(QDMA_REQ_TIMEOUT_MS));
+	if (!ret) {
+		xocl_err(&pdev->dev, "DMA transaction timed out for %s%d",
+			 dir ? "H2C": "C2H", channel);
 		dump_sgtable(&pdev->dev, sgt);
+//		qdma_print_sg_buf(pdev, sgt, len);
+		ret = -EIO;
+	} else {
+		ret = len;
+		chan->usage += len;
 	}
 
-	dma_unmap_sg(&XDEV(xdev)->pdev->dev, sgt->sgl, nents, dir);
-	kfree(req);
+	pci_unmap_sg(pci_dev, sgt->sgl, sgt->orig_nents, dir);
 
 	return ret;
 }
 
 static void release_channel(struct platform_device *pdev, u32 dir, u32 channel)
 {
-	struct xocl_qdma *qdma;
+	struct xocl_qdma *qdma = platform_get_drvdata(pdev);
 
+	if (channel >= qdma->channel) {
+		xocl_err(&pdev->dev, "Invalid channel ID");
+		return;
+	}
 
-	qdma = platform_get_drvdata(pdev);
-        set_bit(channel, &qdma->channel_bitmap[dir]);
-        up(&qdma->channel_sem[dir]);
+//	xocl_info(&pdev->dev, "Releasing %s%d DMA channel", dir ? "H2C" : "C2H",
+//		  channel);
+
+	set_bit(channel, &qdma->channel_bitmap[dir]);
+	up(&qdma->channel_sem[dir]);
+}
+
+static void free_channel(struct platform_device *pdev, bool dir, u32 channel)
+{
+	struct xocl_qdma *qdma = platform_get_drvdata(pdev);
+
+	//xocl_info(&pdev->dev, "Free %s%d channel", dir ? "H2C" : "C2H", channel);
+	dma_release_channel(qdma->chans[dir][channel].chan);
 }
 
 static int acquire_channel(struct platform_device *pdev, u32 dir)
 {
 	struct xocl_qdma *qdma;
-	int channel = 0;
-	int result = 0;
-	u32 write;
+	u32 channel, id = 0;
 
 	qdma = platform_get_drvdata(pdev);
 
-	if (down_killable(&qdma->channel_sem[dir])) {
-		channel = -ERESTARTSYS;
-		goto out;
-	}
+	if (down_killable(&qdma->channel_sem[dir]))
+		return -ERESTARTSYS;
 
+	/* Acquire a free DMA channel */
 	for (channel = 0; channel < qdma->channel; channel++) {
-		result = test_and_clear_bit(channel,
-			&qdma->channel_bitmap[dir]);
-		if (result)
+		id = test_and_clear_bit(channel, &qdma->channel_bitmap[dir]);
+		if (id)
 			break;
-        }
-        if (!result) {
-		// How is this possible?
-		up(&qdma->channel_sem[dir]);
-		channel = -EIO;
-		goto out;
 	}
 
-	write = dir ? 1 : 0;
-	if (strlen(qdma->chans[write][channel].qconf.name) == 0) {
-		xocl_err(&pdev->dev, "queue not started, chan %d", channel);
-		release_channel(pdev, dir, channel);
-		channel = -EINVAL;
+	if (!id) {
+		xocl_err(&pdev->dev, "No free DMA channel found");
+		up(&qdma->channel_sem[dir]);
+		return -EIO;
 	}
-out:
+
+//	xocl_info(&pdev->dev, "Acquired %s%d channel", dir ? "H2C" : "C2H",
+//			channel);
+
 	return channel;
 }
 
-static void free_channels(struct platform_device *pdev)
+static int reserve_channel(struct platform_device *pdev, bool dir, u32 channel)
 {
 	struct xocl_qdma *qdma;
-	struct mm_channel *chan;
-	u32	write, qidx;
-	int i, ret = 0;
-	char *ebuf;
+	char name[16];
 
 	qdma = platform_get_drvdata(pdev);
-	if (!qdma || !qdma->channel)
-		return;
 
-	ebuf = devm_kzalloc(&pdev->dev, MM_EBUF_LEN, GFP_KERNEL);
-	if (ebuf == NULL) {
-		xocl_err(&pdev->dev, "Alloc ebuf mem failed");
-		return;
+	if (dir)
+		sprintf(name, "h2c%d", channel);
+	else
+		sprintf(name, "c2h%d", channel);
+
+	qdma->chans[dir][channel].chan = dma_request_chan(&qdma->pdev->dev,
+							  name);
+	if (IS_ERR(qdma->chans[dir][channel].chan)) {
+		xocl_err(&pdev->dev, "Failed to get %s DMA channel", name);
+		set_bit(channel, &qdma->channel_bitmap[dir]);
+		return -EBUSY;
 	}
+	qdma->chans[dir][channel].dma_hdl = qdma;
+	init_completion(&qdma->chans[dir][channel].req_compl);
 
-	for (i = 0; i < qdma->channel * 2; i++) {
-		memset(ebuf, 0, MM_EBUF_LEN);
-		write = i / qdma->channel;
-		qidx = i % qdma->channel;
-		chan = &qdma->chans[write][qidx];
-
-		channel_sysfs_destroy(chan);
-
-		ret = qdma_queue_stop(qdma->dma_hndl, chan->queue, ebuf, MM_EBUF_LEN);
-		if (ret < 0) {
-			xocl_err(&pdev->dev, "Stopping queue for "
-				"channel %d failed, ret: %x, ebuf: %s", qidx, ret, ebuf);
-		}
-		ret = qdma_queue_remove(qdma->dma_hndl, chan->queue, ebuf, MM_EBUF_LEN);
-		if (ret < 0) {
-			xocl_err(&pdev->dev, "Destroy queue for "
-				"channel %d failed, ret: %x, ebuf: %s", qidx, ret, ebuf);
-		}
-	}
-	if (ebuf)
-		devm_kfree(&pdev->dev, ebuf);
-	if (qdma->chans[0])
-		devm_kfree(&pdev->dev, qdma->chans[0]);
-	if (qdma->chans[1])
-		devm_kfree(&pdev->dev, qdma->chans[1]);
-}
-
-static int set_max_chan(struct xocl_qdma *qdma, u32 count)
-{
-	struct platform_device *pdev = qdma->pdev;
-	struct qdma_queue_conf *qconf;
-	struct mm_channel *chan;
-	u32	write, qidx;
-	char	ebuf[MM_EBUF_LEN + 1];
-	int	i, ret;
-	bool	reset = false;
-
-	if (count > sizeof(qdma->channel_bitmap[0]) * 8) {
-		xocl_info(&pdev->dev, "Invalide number of channels set %d", count);
-		ret = -EINVAL;
-		goto failed_create_queue;
-	}
-
-
-	if (qdma->channel == count)
-		reset = true;
-	qdma->channel = count;
-
-	sema_init(&qdma->channel_sem[0], qdma->channel);
-	sema_init(&qdma->channel_sem[1], qdma->channel);
-
-	/* Initialize bit mask to represent individual channels */
-	qdma->channel_bitmap[0] = GENMASK_ULL(qdma->channel - 1, 0);
-	qdma->channel_bitmap[1] = qdma->channel_bitmap[0];
-
-	xocl_info(&pdev->dev, "Creating MM Queues, Channel %d", qdma->channel);
-	if (!reset) {
-		qdma->chans[0] = devm_kzalloc(&pdev->dev,
-			sizeof(struct mm_channel) * qdma->channel, GFP_KERNEL);
-		qdma->chans[1] = devm_kzalloc(&pdev->dev,
-			sizeof(struct mm_channel) * qdma->channel, GFP_KERNEL);
-		if (qdma->chans[0] == NULL || qdma->chans[1] == NULL) {
-			xocl_err(&pdev->dev, "Alloc channel mem failed");
-			ret = -ENOMEM;
-			goto failed_create_queue;
-		}
-	}
-
-	for (i = 0; i < qdma->channel * 2; i++) {
-		write = i / qdma->channel;
-		qidx = i % qdma->channel;
-		chan = &qdma->chans[write][qidx];
-		qconf = &chan->qconf;
-		chan->qdma = qdma;
-
-		memset(qconf, 0, sizeof (struct qdma_queue_conf));
-		memset(&ebuf, 0, sizeof (ebuf));
-		qconf->wb_status_en =1;
-		qconf->cmpl_status_acc_en=1;
-		qconf->cmpl_status_pend_chk=1;
-		qconf->fetch_credit=1;
-		qconf->cmpl_stat_en=1;
-		qconf->cmpl_trig_mode=1;
-		qconf->desc_rng_sz_idx = MM_DEFAULT_RINGSZ_IDX;
-
-		qconf->st = 0; /* memory mapped */
-		qconf->q_type = write ? Q_H2C : Q_C2H;
-		qconf->qidx = qidx;
-		qconf->irq_en = (qdma->dev_conf.qdma_drv_mode == POLL_MODE) ?
-					0 : 1;
-
-		ret = qdma_queue_add(qdma->dma_hndl, qconf, &chan->queue,
-					ebuf, MM_EBUF_LEN);
-		if (ret < 0) {
-			pr_err("Creating queue failed, ret=%d, %s\n", ret, ebuf);
-			goto failed_create_queue;
-		}
-		ret = qdma_queue_start(qdma->dma_hndl, chan->queue, ebuf,
-					MM_EBUF_LEN);
-		if (ret < 0) {
-			pr_err("Starting queue failed, ret=%d %s.\n", ret, ebuf);
-			goto failed_create_queue;
-		}
-
-		if (!reset) {
-			ret = channel_sysfs_create(chan);
-			if (ret)
-				goto failed_create_queue;
-		}
-	}
-
-	xocl_info(&pdev->dev, "Created %d MM channels (Queues)", qdma->channel);
+	//xocl_info(&pdev->dev, "Reserved %s%d channel", dir ? "H2C" : "C2H",
+	//	  channel);
 
 	return 0;
-
-failed_create_queue:
-	free_channels(pdev);
-
-	return ret;
 }
 
 static u32 get_channel_count(struct platform_device *pdev)
 {
-	struct xocl_qdma *qdma;
+	struct xocl_qdma *qdma  = platform_get_drvdata(pdev);
 
-        qdma = platform_get_drvdata(pdev);
         BUG_ON(!qdma);
 
         return qdma->channel;
 }
 
-static u64 get_channel_stat(struct platform_device *pdev, u32 channel,
-	u32 write)
+static u64 get_channel_stat(struct platform_device *pdev, u32 channel, u32 dir)
 {
-	struct xocl_qdma *qdma;
+	struct xocl_qdma *qdma = platform_get_drvdata(pdev);
 
-        qdma = platform_get_drvdata(pdev);
-        BUG_ON(!qdma);
+	BUG_ON(!qdma);
 
-        return qdma->chans[write][channel].total_trans_bytes;
+	return qdma->chans[dir][channel].usage;
 }
 
 static u64 get_str_stat(struct platform_device *pdev, u32 q_idx)
 {
-	struct xocl_qdma *qdma;
+	struct xocl_qdma *qdma = platform_get_drvdata(pdev);
 
-	qdma = platform_get_drvdata(pdev);
 	BUG_ON(!qdma);
 
 	return 0;
 }
 
+static irqreturn_t qdma_isr(int irq, void *arg)
+{
+	struct qdma_irq *irq_entry = arg;
+	int ret = IRQ_HANDLED;
+
+	if (irq_entry->handler)
+		ret = irq_entry->handler(irq, irq_entry->arg);
+
+	if (!IS_ERR_OR_NULL(irq_entry->event_ctx))
+		eventfd_signal(irq_entry->event_ctx, 1);
+
+	return ret;
+}
+
 static int user_intr_register(struct platform_device *pdev, u32 intr,
 	irq_handler_t handler, void *arg, int event_fd)
 {
-	struct xocl_qdma *qdma;
 	struct eventfd_ctx *trigger = ERR_PTR(-EINVAL);
+	struct xocl_qdma *qdma;
+	struct qdma_irq *irq;
 	unsigned long flags;
 	int ret;
 
 	qdma = platform_get_drvdata(pdev);
 
-	if (!((1 << intr) & qdma->user_msix_mask)) {
-		xocl_err(&pdev->dev, "Invalid intr %d, user intr mask %x",
-				intr, qdma->user_msix_mask);
-		return -EINVAL;
-	}
+	irq = &qdma->user_msix_table[intr];
 
 	if (event_fd >= 0) {
 		trigger = eventfd_ctx_fdget(event_fd);
@@ -628,23 +421,34 @@ static int user_intr_register(struct platform_device *pdev, u32 intr,
 	}
 
 	spin_lock_irqsave(&qdma->user_msix_table_lock, flags);
-	if (qdma->user_msix_table[intr].in_use) {
+	if (irq->in_use) {
 		xocl_err(&pdev->dev, "IRQ %d is in use", intr);
 		ret = -EPERM;
 		goto failed;
 	}
 
-	qdma->user_msix_table[intr].event_ctx = trigger;
-	qdma->user_msix_table[intr].handler = handler;
-	qdma->user_msix_table[intr].arg = arg;
-	qdma->user_msix_table[intr].in_use = true;
+	irq->event_ctx = trigger;
+	irq->handler = handler;
+	irq->arg = arg;
+	irq->user_irq = qdma_get_user_irq(qdma->dma_pdev, intr);
+
+	ret = request_irq(irq->user_irq, qdma_isr, 0, "xocl-qdma-user",
+			  &qdma->user_msix_table[intr]);
+	if (ret) {
+		dev_err(&pdev->dev, "Failed to register intr %d", intr);
+		goto failed;
+	}
+
+	irq->in_use = true;
 
 	spin_unlock_irqrestore(&qdma->user_msix_table_lock, flags);
-
 
 	return 0;
 
 failed:
+	irq->handler = NULL;
+	irq->arg = NULL;
+	irq->event_ctx = NULL;
 	spin_unlock_irqrestore(&qdma->user_msix_table_lock, flags);
 	if (!IS_ERR(trigger))
 		eventfd_ctx_put(trigger);
@@ -656,50 +460,43 @@ static int user_intr_unreg(struct platform_device *pdev, u32 intr)
 {
 	struct xocl_qdma *qdma;
 	unsigned long flags;
-	int ret;
+	int ret = 0;
 
-	qdma= platform_get_drvdata(pdev);
-
-	if (!((1 << intr) & qdma->user_msix_mask)) {
-		xocl_err(&pdev->dev, "Invalid intr %d, user intr mask %x",
-				intr, qdma->user_msix_mask);
-		return -EINVAL;
-	}
+	qdma = platform_get_drvdata(pdev);
 
 	spin_lock_irqsave(&qdma->user_msix_table_lock, flags);
 	if (!qdma->user_msix_table[intr].in_use) {
+		xocl_err(&pdev->dev, "intr %d is not in use", intr);
 		ret = -EINVAL;
 		goto failed;
 	}
+
+	free_irq(qdma->user_msix_table[intr].user_irq,
+		 &qdma->user_msix_table[intr]);
 
 	qdma->user_msix_table[intr].handler = NULL;
 	qdma->user_msix_table[intr].arg = NULL;
 	qdma->user_msix_table[intr].in_use = false;
 
-	spin_unlock_irqrestore(&qdma->user_msix_table_lock, flags);
-	return 0;
 failed:
 	spin_unlock_irqrestore(&qdma->user_msix_table_lock, flags);
-
-
 	return ret;
 }
 
 static int user_intr_config(struct platform_device *pdev, u32 intr, bool en)
 {
+	struct xocl_qdma *qdma;
+	unsigned long flags;
+
+	qdma = platform_get_drvdata(pdev);
+
+	spin_lock_irqsave(&qdma->user_msix_table_lock, flags);
+
+	qdma->user_msix_table[intr].enabled = en;
+
+	spin_unlock_irqrestore(&qdma->user_msix_table_lock, flags);
+
 	return 0;
-}
-
-static void qdma_isr(unsigned long dma_handle, int irq, unsigned long arg)
-{
-	struct xocl_qdma *qdma = (struct xocl_qdma *)arg;
-	struct qdma_irq *irq_entry;
-
-	irq_entry = &qdma->user_msix_table[irq];
-	if (irq_entry->in_use)
-		irq_entry->handler(irq, irq_entry->arg);
-	else
-		xocl_info(&qdma->pdev->dev, "user irq %d not in use", irq);
 }
 
 static struct xocl_dma_funcs qdma_ops = {
@@ -708,62 +505,252 @@ static struct xocl_dma_funcs qdma_ops = {
 	.rel_chan = release_channel,
 	.get_chan_count = get_channel_count,
 	.get_chan_stat = get_channel_stat,
-	.user_intr_register = user_intr_register,
 	.user_intr_config = user_intr_config,
+	.user_intr_register = user_intr_register,
 	.user_intr_unreg = user_intr_unreg,
 	/* qdma */
 	.get_str_stat = get_str_stat,
 };
 
-static int qdma_csr_prog_ta(struct pci_dev *pdev, int bar,
-				resource_size_t base)
+static int qdma_config_pci(struct pci_dev *pdev)
 {
-	resource_size_t bar_start;
-	void __iomem    *regs;
+	u16 vid, did, val;
+	int ret;
 
-	bar_start = pci_resource_start(pdev, bar);
-        regs = ioremap_nocache(bar_start + base, 0x4000);
-        if (!regs) {
-                pr_warn("%s unable to map csr bar %d, base 0x%lx.\n",
-			dev_name(&pdev->dev), bar, (unsigned long)base);
-                return -EINVAL;
-        }
+	pci_read_config_word(pdev, PCI_VENDOR_ID, &vid);
+	pci_read_config_word(pdev, PCI_DEVICE_ID, &did);
 
-	/* To enable slave bridge:
-	 * First entry of the BDF table programming.
-	 * Offset	Program Value	Register info
-	 * 0x2420	0x0	Address translation value Low
-	 * 0x2424	0x0	Address translation value High
-	 * 0x2428	0x0	PASID
-	 * 0x242C	0x1	[11:0]: Function Number
-	 * 0x2430	0xC2000000	[31:30] Read/Write Access permission
-	 *				[25:0] Window Size
-	 * 				([25:0]*4K  = actual size of the window)
-	 * 0x2434	0x0	SMID
-	 */
+	dev_info(&pdev->dev,
+		 "AMD PCI test driver probed with VID: %#x, DID: %#x\n", vid,
+		 did);
 
-	writel(0, regs + 0x2420);
-	writel(0, regs + 0x2424);
-	writel(0, regs + 0x2428);
-	writel(1, regs + 0x242C);
-	writel(0xC2000000, regs + 0x2430);
-	writel(0, regs + 0x2434);
+	ret = pci_enable_device(pdev);
+	if (ret) {
+		dev_err(&pdev->dev, "Failed to enable PCI device\n");
+		return ret;
+	}
 
-	iounmap(regs);
+	/* Clear pending interrupt if needed */
+	ret = pci_read_config_word(pdev, PCI_STATUS, &val);
+	if (ret)
+		return ret;
+
+	if (val & PCI_STATUS_INTERRUPT) {
+		dev_info(&pdev->dev, "PCI STATUS Interrupt pending 0x%x", val);
+		ret = pci_write_config_word(pdev, PCI_STATUS,
+					    PCI_STATUS_INTERRUPT);
+		if (ret)
+			return ret;
+	}
+
+	/* Enable relaxed ordering */
+	pcie_capability_set_word(pdev, PCI_EXP_DEVCTL, PCI_EXP_DEVCTL_RELAX_EN);
+
+	/* Enable extended tag */
+	ret = pcie_capability_read_word(pdev, PCI_EXP_DEVCTL, &val);
+	if (ret)
+		return ret;
+
+	if (!(val & PCI_EXP_DEVCTL_EXT_TAG)) {
+		ret = pcie_capability_set_word(pdev, PCI_EXP_DEVCTL,
+		                               PCI_EXP_DEVCTL_EXT_TAG);
+		if (ret)
+		        return ret;
+	}
+
+	/* PCIE read request size set to 512B */
+	if (pcie_get_readrq(pdev) < AMD_PCIE_READ_RQ_SIZE) {
+		ret = pcie_set_readrq(pdev, AMD_PCIE_READ_RQ_SIZE);
+		if (ret)
+			return ret;
+	}
+
+	/* Enable bus master capability */
+	pci_set_master(pdev);
+
+	/* Set DMA addressing capability */
+	ret = dma_set_mask_and_coherent(&pdev->dev,
+					DMA_BIT_MASK(AMD_PCIE_QDMA_ADDR_CAP_SIZE));
+	if (ret) {
+		dev_err(&pdev->dev, "Failed to set DMA addressing to %d-bits\n",
+			AMD_PCIE_QDMA_ADDR_CAP_SIZE);
+		return ret;
+	}
+
 	return 0;
+}
+
+static void qdma_clear_config_pci(struct pci_dev *pdev)
+{
+	/* Disable extended tag*/
+	pcie_capability_clear_word(pdev, PCI_EXP_DEVCTL,
+				   PCI_EXP_DEVCTL_EXT_TAG);
+	/* Disable relaxed ordering */
+	pcie_capability_clear_word(pdev, PCI_EXP_DEVCTL,
+				   PCI_EXP_DEVCTL_RELAX_EN);
+	pci_clear_master(pdev);
+	pci_disable_device(pdev);
+}
+
+static struct qdma_queue_info h2c_queue_info = {
+	.dir = DMA_MEM_TO_DEV,
+};
+
+static struct qdma_queue_info c2h_queue_info = {
+	.dir = DMA_DEV_TO_MEM,
+};
+
+static int qdma_alloc_platform_device(struct xocl_qdma *qdma)
+{
+	struct resource res[AMD_QDMA_DEV_NUM_RES] = {0};
+	struct platform_device *dev;
+	struct dma_slave_map *map;
+	struct qdma_platdata data;
+	struct pci_dev *pdev;
+	int ret = 0, nvec;
+	u8 i, index = 0;
+
+	pdev = XDEV(xocl_get_xdev(qdma->pdev))->pdev;
+
+	/* Populate resources from BAR */
+	for (i = PCI_STD_RESOURCES; i <= PCI_STD_RESOURCE_END; i++) {
+		resource_size_t len;
+		void __iomem *regs;
+		u32 value;
+
+		len = pci_resource_len(pdev, i);
+		if (!len)
+			continue;
+
+		regs = pci_iomap(pdev, i, len);
+		if (IS_ERR(regs)) {
+			ret = PTR_ERR(regs);
+			xocl_err(&pdev->dev,
+				 "Failed to map bar %d with error %d\n",
+				 i, ret);
+			return ret;
+		}
+
+		/* Check if BAR is type is DMA */
+		value = ioread32(regs + AMD_PCIE_QDMA_BAR_IDENTIFIER_REGOFF);
+		value = FIELD_GET(AMD_PCIE_QDMA_BAR_IDENTIFIER_MASK, value);
+		if (value == AMD_PCIE_QDMA_BAR_IDENTIFIER) {
+			xocl_info(&pdev->dev,
+				 "PCIe QDMA config bar found at index: %d", i);
+
+			res[index].start = pci_resource_start(pdev, i);
+			res[index].end = pci_resource_end(pdev, i);
+			res[index].flags = IORESOURCE_MEM;
+			res[index].parent = &pdev->resource[i];
+			index++;
+		}
+
+		pci_iounmap(pdev, regs);
+
+		xocl_info(&pdev->dev,
+			  "Resource id: %d\tlen: %#llx\tstart: %#llx\tend: %#llx\n",
+			  i, len, pci_resource_start(pdev, i),
+			  pci_resource_end(pdev, i));
+	}
+
+	if (!index) {
+		xocl_err(&pdev->dev, "Failed to find DMA device\n");
+		return -ENODEV;
+	}
+
+	nvec = pci_msix_vec_count(pdev);
+	if (nvec < 0) {
+		xocl_err(&pdev->dev, "Failed to find MSI-X vectors\n");
+		return nvec;
+	}
+
+	xocl_info(&pdev->dev, "%d MSI-X interrupt supported", nvec);
+
+	ret = pci_alloc_irq_vectors(pdev, nvec, nvec, PCI_IRQ_MSIX);
+	if (ret < 0) {
+		xocl_err(&pdev->dev, "Failed to alloc IRQ vectors: %d", ret);
+		return ret;
+	}
+
+	res[index].start = pci_irq_vector(pdev, 0);
+	res[index].end = res[index].start + nvec - 1;
+	res[index].flags = IORESOURCE_IRQ;
+	index++;
+
+	data.user_irqs = QDMA_MAX_USER_INTR;
+
+	dev = platform_device_alloc(AMD_QDMA_DEVICE_NAME, PLATFORM_DEVID_AUTO);
+	if (!dev) {
+		xocl_err(&pdev->dev,
+			"Failed to register QDMA platform device with error\n");
+		pci_free_irq_vectors(pdev);
+		return -ENOMEM;
+	}
+
+	ret = platform_device_add_resources(dev, res, index);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add resource\n");
+		goto failed;
+	}
+
+	data.device_map = devm_kzalloc(&qdma->pdev->dev,
+				       sizeof(struct dma_slave_map) *
+				       qdma_max_channel * 2,
+				       GFP_KERNEL);
+	data.device_map_cnt = qdma_max_channel * 2;
+
+	for (i = 0; i < qdma_max_channel; i++) {
+		map = &data.device_map[i];
+		map->devname = dev_name(&qdma->pdev->dev);
+		map->slave = devm_kasprintf(&qdma->pdev->dev, GFP_KERNEL,
+					    "h2c%d", i);
+		if (!map->slave)
+			goto failed;
+		map->param = QDMA_FILTER_PARAM(&h2c_queue_info);
+
+		map = &data.device_map[i + qdma_max_channel];
+		map->devname = dev_name(&qdma->pdev->dev);
+		map->slave = devm_kasprintf(&qdma->pdev->dev, GFP_KERNEL,
+					    "c2h%d", i);
+		if (!map->slave)
+			goto failed;
+		map->param = QDMA_FILTER_PARAM(&c2h_queue_info);
+	}
+
+	data.max_mm_channels = qdma_max_channel;
+
+	ret = platform_device_add_data(dev, &data,
+				       sizeof(struct qdma_platdata));
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add device config data\n");
+		goto failed;
+	}
+
+	dev->dev.parent = &pdev->dev;
+
+	ret = platform_device_add(dev);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add platform device\n");
+		goto failed;
+	}
+
+	qdma->dma_pdev = dev;
+	return 0;
+failed:
+	pci_free_irq_vectors(pdev);
+	platform_device_put(dev);
+	return ret;
 }
 
 static int qdma_probe(struct platform_device *pdev)
 {
 	struct xocl_qdma *qdma = NULL;
-	struct qdma_dev_conf *conf;
-	xdev_handle_t	xdev;
-	struct resource *res = NULL;
-	int	i, ret = 0, dma_bar = -1;
-	int csr_bar = -1;
-	resource_size_t csr_base = -1;
+	xdev_handle_t xdev;
+	int ret = 0;
+	u32 i, dir;
 
 	xdev = xocl_get_xdev(pdev);
+	BUG_ON(!xdev);
 
 	qdma = xocl_drvinst_alloc(&pdev->dev, sizeof(*qdma));
 	if (!qdma) {
@@ -773,118 +760,61 @@ static int qdma_probe(struct platform_device *pdev)
 	}
 
 	qdma->pdev = pdev;
+
 	platform_set_drvdata(pdev, qdma);
 
-	for (i = 0, res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-		res;
-		res = platform_get_resource(pdev, IORESOURCE_MEM, ++i)) {
-		if (!strncmp(res->name, NODE_QDMA, strlen(NODE_QDMA))) {
-			ret = xocl_ioaddr_to_baroff(xdev, res->start, &dma_bar,
-							NULL);
-			if (ret) {
-				xocl_err(&pdev->dev,
-					"Invalid resource %pR", res);
-				return -EINVAL;
-			}
-		} else if (!strncmp(res->name, NODE_QDMA_CSR,
-					strlen(NODE_QDMA_CSR))) {
-			ret = xocl_ioaddr_to_baroff(xdev, res->start, &csr_bar,
-							NULL);
-			if (ret) {
-				xocl_err(&pdev->dev,
-					 "CSR: Invalid resource %pR", res);
-				return -EINVAL;
-			}
-
-			csr_base = res->start -
-				pci_resource_start(XDEV(xdev)->pdev, csr_bar);
-		} else {
-			xocl_err(&pdev->dev, "Unknown resource: %s", res->name);
-			return -EINVAL;
-		}
-	}
-
-	if (dma_bar == -1) {
-		xocl_err(&pdev->dev, "missing resource, dma_bar %d", dma_bar);
-		return -EINVAL;
-	}
-
-	conf = &qdma->dev_conf;
-	memset(conf, 0, sizeof(*conf));
-	conf->pdev = XDEV(xdev)->pdev;
-	//conf->intr_rngsz = QDMA_INTR_COAL_RING_SIZE;
-	//conf->master_pf = XOCL_DSA_IS_SMARTN(xdev) ? 0 : 1;
-	conf->master_pf = 1;
-	conf->qsets_base = QDMA_QSETS_BASE;
-	conf->qsets_max = QDMA_QSETS_MAX;
-	conf->bar_num_config = dma_bar;
-	conf->bar_num_user = -1;
-	conf->bar_num_bypass = -1;
-	conf->data_msix_qvec_max = 1;
-	conf->user_msix_qvec_max = 16;
-	conf->msix_qvec_max = 32;
-	conf->qdma_drv_mode = qdma_interrupt_mode;
-
-	conf->fp_user_isr_handler = (void*)qdma_isr;
-	conf->uld = (unsigned long)qdma;
-
-	xocl_info(&pdev->dev, "dma %d, mode 0x%x.\n",
-		dma_bar, conf->qdma_drv_mode);
-	ret = qdma_device_open(XOCL_MODULE_NAME, conf, &qdma->dma_hndl);
-	if (ret < 0) {
-		xocl_err(&pdev->dev, "QDMA Device Open failed");
-		goto failed;
-	}
-
-	if (csr_bar >= 0) {
-		xocl_info(&pdev->dev, "csr bar %d, base 0x%lx.",
-			csr_bar, (unsigned long)csr_base);
-
-		ret = qdma_csr_prog_ta(XDEV(xdev)->pdev, csr_bar, csr_base);
-		if (ret < 0)
-			xocl_err(&pdev->dev,
-				"Host memory BDF program failed (%d,0x%lx).",
-				csr_bar, (unsigned long)csr_base);
-		else
-			xocl_info(&pdev->dev,
-				"Host memory BDF programmed (%d,0x%lx).",
-				csr_bar, (unsigned long)csr_base);
-	}
-
-	if (!XOCL_DSA_IS_SMARTN(xdev)) {
-		ret = set_max_chan(qdma, qdma_max_channel);
-		if (ret) {
-			xocl_err(&pdev->dev, "Set max channel failed");
-			goto failed;
-		}
-	}
-
-	ret = qdma_device_get_config(qdma->dma_hndl, &qdma->dev_conf, NULL, 0);
+	ret = qdma_config_pci(XDEV(xdev)->pdev);
 	if (ret) {
-		xocl_err(&pdev->dev, "Failed to get device info");
+		xocl_err(&pdev->dev, "Failed to configure PCIe: %d", ret);
 		goto failed;
 	}
+
+	ret = qdma_alloc_platform_device(qdma);
+	if (ret) {
+		xocl_err(&pdev->dev,
+			 "Failed to allocate QDMA platform device: %d", ret);
+		goto failed;
+	}
+
+	qdma->channel = qdma_max_channel;
+
+	for (i = 0; i < qdma->channel; i++) {
+		for (dir = 0; dir < 2; dir++) {
+			ret = reserve_channel(pdev, dir, i);
+			if (ret < 0) {
+				xocl_info(&pdev->dev,
+					  "Failed to reserve DMA channel");
+				goto failed;
+			}
+
+			sema_init(&qdma->channel_sem[dir], qdma->channel);
+			qdma->channel_bitmap[dir] = BIT(qdma->channel) - 1;
+		}
+	}
+
+	xocl_info(&pdev->dev, "Max MM DMA channels: %d", qdma->channel);
+
+	qdma->user_msix_table = devm_kzalloc(&pdev->dev, QDMA_MAX_USER_INTR *
+					     sizeof(struct qdma_irq),
+					     GFP_KERNEL);
+	if (!qdma->user_msix_table) {
+		xocl_err(&pdev->dev, "user_msix_table allocation failed");
+		ret = -ENOMEM;
+		goto failed;
+	}
+	spin_lock_init(&qdma->user_msix_table_lock);
 
 	ret = sysfs_create_group(&pdev->dev.kobj, &qdma_attrgroup);
 	if (ret) {
-		xocl_err(&pdev->dev, "create sysfs group failed");
+		xocl_err(&pdev->dev, "Failed to create sysfs group: %d", ret);
 		goto failed;
 	}
 
-	qdma->user_msix_mask = QDMA_USER_INTR_MASK;
-
-	mutex_init(&qdma->str_dev_lock);
-	spin_lock_init(&qdma->user_msix_table_lock);
-
 	return 0;
-
 failed:
 	if (qdma) {
-		free_channels(qdma->pdev);
-
-		if (qdma->dma_hndl)
-			qdma_device_close(XDEV(xdev)->pdev, qdma->dma_hndl);
-
+		platform_device_unregister(qdma->dma_pdev);
+		qdma_clear_config_pci(XDEV(xocl_get_xdev(pdev))->pdev);
 		xocl_drvinst_release(qdma, NULL);
 	}
 
@@ -895,43 +825,59 @@ failed:
 
 static int qdma_remove(struct platform_device *pdev)
 {
-	struct xocl_qdma *qdma= platform_get_drvdata(pdev);
+	struct xocl_qdma *qdma = platform_get_drvdata(pdev);
 	xdev_handle_t xdev;
+	struct pci_dev *pcidev;
 	struct qdma_irq *irq_entry;
+	u32 i, dir;
 	void *hdl;
-	int i;
 
-	xocl_drvinst_release(qdma, &hdl);
-	sysfs_remove_group(&pdev->dev.kobj, &qdma_attrgroup);
+	xdev = xocl_get_xdev(pdev);
+	BUG_ON(!xdev);
 
 	if (!qdma) {
-		xocl_err(&pdev->dev, "driver data is NULL");
+		xocl_err(&pdev->dev, "Driver data is NULL");
 		return -EINVAL;
 	}
 
-	xdev = xocl_get_xdev(pdev);
+	pcidev = XDEV(xdev)->pdev;
 
-	free_channels(pdev);
+	if (!dev_is_pci(&pcidev->dev)) {
+		xocl_err(&pdev->dev, "Invalid PCIe device");
+		return -EINVAL;
+	}
 
-	qdma_device_close(XDEV(xdev)->pdev, qdma->dma_hndl);
+	sysfs_remove_group(&pdev->dev.kobj, &qdma_attrgroup);
 
-	for (i = 0; i < ARRAY_SIZE(qdma->user_msix_table); i++) {
+	for (i = 0; i < QDMA_MAX_USER_INTR; i++) {
 		irq_entry = &qdma->user_msix_table[i];
 		if (irq_entry->in_use) {
-			if (irq_entry->enabled)
-				xocl_err(&pdev->dev,
+			if (irq_entry->enabled) {
+				xocl_warn(&pdev->dev,
 					"ERROR: Interrupt %d is still on", i);
+				user_intr_config(pdev, i, false);
+				user_intr_unreg(pdev, i);
+			}
+
 			if(!IS_ERR_OR_NULL(irq_entry->event_ctx))
 				eventfd_ctx_put(irq_entry->event_ctx);
 		}
 	}
 
+	for (i = 0; i < qdma->channel; i++) {
+		for (dir = 0; dir < 2; dir++) {
+			if (!test_bit(i, &qdma->channel_bitmap[dir]))
+				release_channel(pdev, dir, i);
+			free_channel(pdev, dir, i);
+		}
+	}
 
-	mutex_destroy(&qdma->str_dev_lock);
-
-	platform_set_drvdata(pdev, NULL);
+	platform_device_unregister(qdma->dma_pdev);
+	pci_free_irq_vectors(pcidev);
+	qdma_clear_config_pci(pcidev);
+	xocl_drvinst_release(qdma, &hdl);
 	xocl_drvinst_free(hdl);
-
+	platform_set_drvdata(pdev, NULL);
 	return 0;
 }
 
@@ -956,48 +902,10 @@ static struct platform_driver	qdma_driver = {
 
 int __init xocl_init_qdma(void)
 {
-	int		err = 0;
-
-	qdma_debugfs_root = debugfs_create_dir("qdma_dev", NULL);
-	if (!qdma_debugfs_root) {
-		pr_err("%s: Failed to create debugfs\n", __func__);
-		return -ENODEV;
-	}
-
-	err = libqdma_init(0, qdma_debugfs_root);
-	if (err)
-		return err;
-	err = alloc_chrdev_region(&str_dev, 0, XOCL_CHARDEV_REG_COUNT,
-			XOCL_QDMA);
-	if (err < 0)
-		goto err_reg_chrdev;
-
-	err = platform_driver_register(&qdma_driver);
-	if (err)
-		goto err_drv_reg;
-
-	return 0;
-
-err_drv_reg:
-	unregister_chrdev_region(str_dev, XOCL_CHARDEV_REG_COUNT);
-err_reg_chrdev:
-	libqdma_exit();
-
-	if (qdma_debugfs_root) {
-		debugfs_remove_recursive(qdma_debugfs_root);
-		qdma_debugfs_root = NULL;
-	}
-
-	return err;
+	return platform_driver_register(&qdma_driver);
 }
 
 void xocl_fini_qdma(void)
 {
-	unregister_chrdev_region(str_dev, XOCL_CHARDEV_REG_COUNT);
-	platform_driver_unregister(&qdma_driver);
-	libqdma_exit();
-	if (qdma_debugfs_root) {
-		debugfs_remove_recursive(qdma_debugfs_root);
-		qdma_debugfs_root = NULL;
-	}
+	return platform_driver_unregister(&qdma_driver);
 }
