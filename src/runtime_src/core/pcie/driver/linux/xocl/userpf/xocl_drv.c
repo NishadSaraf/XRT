@@ -6,14 +6,17 @@
  * Authors: Lizhi.Hou@xilinx.com
  */
 
+#include <linux/bitfield.h>
 #include <linux/aer.h>
 #include <linux/crc32c.h>
 #include <linux/iommu.h>
 #include <linux/kernel.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/pagemap.h>
 #include <linux/pci.h>
 #include <linux/random.h>
+#include <linux/timer.h>
 #include <linux/version.h>
 
 #include "common.h"
@@ -746,6 +749,9 @@ static void xocl_mailbox_srv(void *arg, void *data, size_t len,
 			/* Mgmt is offline, mark peer as not ready */
 			userpf_info(xdev, "mgmt driver offline\n");
 			(void) xocl_mailbox_set(xdev, CHAN_STATE, 0);
+			xdev->core.is_mbx_version_valid = false;
+			mod_timer(&xdev->core.mgmt_status_timer,
+				  jiffies + (HZ*5));
 		} else {
 			userpf_err(xdev, "unknown peer state flag (0x%llx)\n",
 				st->state_flags);
@@ -936,6 +942,7 @@ int xocl_refresh_subdevs(struct xocl_dev *xdev)
 
 	/* clean up mem topology */
 	if (xdev->core.drm) {
+		userpf_info(xdev, "%d", __LINE__);
 		xocl_drm_fini(xdev->core.drm);
 		xdev->core.drm = NULL;
 	}
@@ -963,6 +970,7 @@ int xocl_refresh_subdevs(struct xocl_dev *xdev)
 	}
 
 	if (XOCL_DSA_IS_VERSAL_ES3(xdev)) {
+		userpf_info(xdev, "%d", __LINE__);
 		//probe & initialize hwmon_sdm driver only on versal
 		ret = xocl_hwmon_sdm_init(xdev);
 		if (ret) {
@@ -1001,6 +1009,475 @@ failed:
 
 	return ret;
 }
+
+#define XOCL_PCIE_QDMA_BAR_INDEX		2
+#define XOCL_PCIE_QDMA_BAR_IDENTIFIER		0x1FD3
+#define XOCL_PCIE_QDMA_BAR_IDENTIFIER_REGOFF	0x0
+#define XOCL_PCIE_QDMA_BAR_IDENTIFIER_MASK	GENMASK(31, 16)
+
+static int xocl_create_rom_platdev(struct xocl_dev *xdev)
+{
+	struct pci_dev *pdev = xdev->core.pdev;
+	struct platform_device *dev;
+	int ret = 0;
+	struct FeatureRomHeader vrom = {0};
+	char name[64] = "xilinx_v70_gen5x8_qdma_base_2";
+
+	strncpy(vrom.EntryPointString, "xlnx", 4);
+	strncpy(vrom.VBNVName, name, strlen(name));
+	vrom.FeatureBitMap = 1;
+
+	dev = platform_device_alloc(XOCL_DEVNAME(XOCL_FEATURE_ROM),
+				    PLATFORM_DEVID_AUTO);
+	if (!dev) {
+		xocl_err(&pdev->dev,
+			"Failed to register ROM platform device with error\n");
+		return -ENOMEM;
+	}
+
+	dev->dev.parent = &pdev->dev;
+
+	ret = platform_device_add_data(dev, &vrom, sizeof(vrom));
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add platform data\n");
+		goto failed;
+	}
+
+	ret = platform_device_add(dev);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add platform device\n");
+		goto failed;
+	}
+
+	xdev->core.rom_platdev = dev;
+
+	return 0;
+failed:
+	platform_device_put(dev);
+	return ret;
+
+}
+
+static int xocl_create_icap_platdev(struct xocl_dev *xdev)
+{
+	struct pci_dev *pdev = xdev->core.pdev;
+	struct platform_device *dev;
+	int ret = 0;
+
+	dev = platform_device_alloc(XOCL_DEVNAME(XOCL_ICAP),
+				    PLATFORM_DEVID_AUTO);
+	if (!dev) {
+		xocl_err(&pdev->dev,
+			"Failed to register mailbox platform device with error\n");
+		return -ENOMEM;
+	}
+
+	dev->dev.parent = &pdev->dev;
+
+	ret = platform_device_add(dev);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add platform device\n");
+		goto failed;
+	}
+
+	xdev->core.icap_platdev = dev;
+
+	return 0;
+failed:
+	platform_device_put(dev);
+	return ret;
+
+}
+
+static int xocl_create_mbx_platdev(struct xocl_dev *xdev)
+{
+	struct pci_dev *pdev = xdev->core.pdev;
+	struct resource res[1] = {0};
+	struct platform_device *dev;
+	u8 bar = 2, index = 0;
+	u64 bar_off;
+	int ret = 0;
+
+	bar_off = pci_resource_start(pdev, bar);
+
+	res[index].start = bar_off + 0x02000000;
+	res[index].end = bar_off + 0x02000fff;
+	res[index].flags = IORESOURCE_MEM;
+	res[index].parent = &pdev->resource[bar];
+	res[index++].name = "ep_mailbox_user_00";
+
+	dev = platform_device_alloc(XOCL_DEVNAME(XOCL_MAILBOX),
+				    PLATFORM_DEVID_AUTO);
+	if (!dev) {
+		xocl_err(&pdev->dev,
+			"Failed to register mailbox platform device with error\n");
+		return -ENOMEM;
+	}
+
+	ret = platform_device_add_resources(dev, res, index);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add resource\n");
+		goto failed;
+	}
+
+	dev->dev.parent = &pdev->dev;
+
+	ret = platform_device_add(dev);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add platform device\n");
+		goto failed;
+	}
+
+	xdev->core.mbx_platdev = dev;
+
+	return 0;
+failed:
+	platform_device_put(dev);
+	return ret;
+
+}
+
+static int xocl_create_ert_ctrl_platdev(struct xocl_dev *xdev)
+{
+	struct pci_dev *pdev = xdev->core.pdev;
+	struct resource res[9] = {0};
+	struct platform_device *dev;
+	u8 bar = 2, index = 0;
+	u64 bar_off;
+	int ret = 0;
+
+	bar_off = pci_resource_start(pdev, bar);
+
+	res[index].start = bar_off + 0x06000000;
+	res[index].end = bar_off + 0x06ffffff;
+	res[index].flags = IORESOURCE_MEM;
+	res[index].parent = &pdev->resource[bar];
+	res[index++].name = "ep_xgq_payload_user_00";
+
+	res[index].start = bar_off + 0x02010000;
+	res[index].end = bar_off + 0x02010fff;
+	res[index].flags = IORESOURCE_MEM;
+	res[index].parent = &pdev->resource[bar];
+	res[index++].name = "ep_xgq_user_to_apu_sq_pi_00";
+
+	res[index].start = bar_off + 0x02011000;
+	res[index].end = bar_off + 0x02011fff;
+	res[index].flags = IORESOURCE_MEM;
+	res[index].parent = &pdev->resource[bar];
+	res[index++].name = "ep_xgq_user_to_apu_sq_pi_01";
+
+	res[index].start = bar_off + 0x02012000;
+	res[index].end = bar_off + 0x02012fff;
+	res[index].flags = IORESOURCE_MEM;
+	res[index].parent = &pdev->resource[bar];
+	res[index++].name = "ep_xgq_user_to_apu_sq_pi_02";
+
+	res[index].start = bar_off + 0x02013000;
+	res[index].end = bar_off + 0x02013fff;
+	res[index].flags = IORESOURCE_MEM;
+	res[index].parent = &pdev->resource[bar];
+	res[index++].name = "ep_xgq_user_to_apu_sq_pi_03";
+
+	res[index].start = 9;
+	res[index].end = 9;
+	res[index].flags = IORESOURCE_IRQ;
+	res[index++].name = "ep_xgq_user_to_apu_sq_pi_00";
+
+	res[index].start = 10;
+	res[index].end = 10;
+	res[index].flags = IORESOURCE_IRQ;
+	res[index++].name = "ep_xgq_user_to_apu_sq_pi_01";
+
+	res[index].start = 11;
+	res[index].end = 11;
+	res[index].flags = IORESOURCE_IRQ;
+	res[index++].name = "ep_xgq_user_to_apu_sq_pi_02";
+
+	res[index].start = 12;
+	res[index].end = 12;
+	res[index].flags = IORESOURCE_IRQ;
+	res[index++].name = "ep_xgq_user_to_apu_sq_pi_03";
+
+	dev = platform_device_alloc(XOCL_DEVNAME(XOCL_ERT_CTRL_VERSAL),
+				    PLATFORM_DEVID_AUTO);
+	if (!dev) {
+		xocl_err(&pdev->dev,
+			"Failed to register ERT control platform device with error\n");
+		return -ENOMEM;
+	}
+
+	ret = platform_device_add_resources(dev, res, index);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add resource\n");
+		goto failed;
+	}
+
+	dev->dev.parent = &pdev->dev;
+
+	ret = platform_device_add(dev);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add platform device\n");
+		goto failed;
+	}
+
+	xdev->core.ert_ctrl_platdev = dev;
+
+	return 0;
+failed:
+	platform_device_put(dev);
+	return ret;
+}
+
+static int xocl_create_qdma_platdev(struct xocl_dev *xdev)
+{
+	struct pci_dev *pdev = xdev->core.pdev;
+	struct resource res[2] = {0};
+	struct platform_device *dev;
+	int ret = 0;
+	u8 i, index = 0;
+
+	/* Populate resources from BAR */
+	for (i = PCI_STD_RESOURCES; i <= PCI_STD_RESOURCE_END; i++) {
+		resource_size_t len;
+		void __iomem *regs;
+		u32 value;
+
+		len = pci_resource_len(pdev, i);
+		if (!len)
+			continue;
+
+		regs = pci_iomap(pdev, i, len);
+		if (IS_ERR(regs)) {
+			ret = PTR_ERR(regs);
+			xocl_err(&pdev->dev,
+				 "Failed to map bar %d with error %d\n",
+				 i, ret);
+			return ret;
+		}
+
+		/* Check if BAR is type is DMA */
+		value = ioread32(regs + XOCL_PCIE_QDMA_BAR_IDENTIFIER_REGOFF);
+		value = FIELD_GET(XOCL_PCIE_QDMA_BAR_IDENTIFIER_MASK, value);
+		if (value == XOCL_PCIE_QDMA_BAR_IDENTIFIER) {
+			xocl_info(&pdev->dev,
+				 "PCIe QDMA config bar found at index: %d", i);
+			res[index].start = pci_resource_start(pdev, i);
+			res[index].end = pci_resource_end(pdev, i);
+			res[index].flags = IORESOURCE_MEM;
+			res[index].parent = &pdev->resource[i];
+			res[index].name = NODE_QDMA;
+
+			xocl_info(&pdev->dev, "QDMA memory resource: %pRx\n",
+				  &res[index]);
+			index++;
+		}
+
+		pci_iounmap(pdev, regs);
+	}
+
+	if (!index) {
+		xocl_err(&pdev->dev, "Failed to find DMA device\n");
+		return -ENODEV;
+	}
+
+	dev = platform_device_alloc(XOCL_DEVNAME(XOCL_QDMA),
+				    PLATFORM_DEVID_AUTO);
+	if (!dev) {
+		xocl_err(&pdev->dev,
+			"Failed to register QDMA platform device with error\n");
+		return -ENOMEM;
+	}
+
+	ret = platform_device_add_resources(dev, res, index);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add resource\n");
+		goto failed;
+	}
+
+	dev->dev.parent = &pdev->dev;
+
+	ret = platform_device_add(dev);
+	if (ret) {
+		xocl_err(&pdev->dev, "Failed to add platform device\n");
+		goto failed;
+	}
+
+	xdev->core.dma_platdev = dev;
+
+	return 0;
+failed:
+	platform_device_put(dev);
+	return ret;
+}
+
+int xocl_versal_create_platdevs(struct xocl_dev *xdev)
+{
+	int ret;
+
+	ret = xocl_create_rom_platdev(xdev);
+	if (ret) {
+		userpf_err(xdev, "Failed to create ROM platform device");
+		goto exit;
+	}
+
+	ret = xocl_create_qdma_platdev(xdev);
+	if (ret) {
+		userpf_err(xdev, "Failed to create QDMA platform device");
+		goto exit;
+	}
+
+	ret = xocl_create_ert_ctrl_platdev(xdev);
+	if (ret) {
+		userpf_err(xdev, "Failed to create ERT control platform device");
+		goto exit;
+	}
+
+	ret = xocl_create_icap_platdev(xdev);
+	if (ret) {
+		userpf_err(xdev, "Failed to create ICAP platform device");
+		goto exit;
+	}
+
+	ret = xocl_create_mbx_platdev(xdev);
+	if (ret) {
+		userpf_err(xdev, "Failed to create mailbox platform device");
+		goto exit;
+	}
+exit:
+	return ret;
+}
+
+int xocl_vmgmt_refresh_suddevs(struct xocl_dev *xdev)
+{
+	userpf_info(xdev, "Versal Mgmt subdev refresh routine");
+//	return xocl_refresh_subdevs(xdev);
+
+	bool offline = false;
+	int ret = 0;
+
+	store_pcie_link_info(xdev);
+
+	ret = xocl_drvinst_get_offline(xdev->core.drm, &offline);
+	if (ret == -ENODEV || offline) {
+		userpf_info(xdev, "online current devices");
+	        xocl_reset_notify(xdev->core.pdev, false);
+		xocl_drvinst_set_offline(xdev->core.drm, false);
+	}
+
+	xocl_drvinst_set_offline(xdev->core.drm, true);
+
+	/* clean up mem topology */
+	if (xdev->core.drm) {
+		xocl_drm_fini(xdev->core.drm);
+		xdev->core.drm = NULL;
+	}
+
+	xocl_fini_sysfs(xdev);
+
+	xocl_subdev_offline_all(xdev);
+
+	xocl_subdev_destroy_all(xdev);
+
+	ret = identify_bar(xdev);
+	if (ret) {
+		userpf_err(xdev, "failed to identify bar");
+		goto failed;
+	}
+
+//	ret = xocl_subdev_create_by_id(xdev, XOCL_SUBDEV_FEATURE_ROM);
+//	if (ret)
+//		goto failed;
+
+	ret = xocl_versal_create_platdevs(xdev);
+	if (ret)
+		goto failed;
+
+	ret = xocl_p2p_init(xdev);
+	if (ret) {
+		userpf_err(xdev, "failed to init p2p memory");
+		goto failed;
+	}
+
+//	if (XOCL_DSA_IS_VERSAL_ES3(xdev)) {
+//		//probe & initialize hwmon_sdm driver only on versal
+//		ret = xocl_hwmon_sdm_init(xdev);
+//		if (ret) {
+//			userpf_err(xdev, "failed to init hwmon_sdm driver, err: %d", ret);
+//			goto failed;
+//		}
+//	}
+//
+	(void) xocl_peer_listen(xdev, xocl_mailbox_srv, (void *)xdev);
+
+	ret = xocl_init_sysfs(xdev);
+	if (ret) {
+		userpf_err(xdev, "Unable to create sysfs %d", ret);
+		goto failed;
+	}
+
+	if (!xdev->core.drm) {
+		xdev->core.drm = xocl_drm_init(xdev);
+		if (!xdev->core.drm) {
+			userpf_err(xdev, "Unable to init drm");
+			goto failed;
+		}
+	}
+
+	xocl_drvinst_set_offline(xdev->core.drm, false);
+
+failed:
+	return ret;
+}
+
+void xocl_poll_mgmt_status(struct work_struct *w)
+{
+	struct xocl_dev_core *xdev = container_of(w, struct xocl_dev_core,
+						  mgmt_status_poll);
+	char wq_name[15];
+	struct xcl_mailbox_info info;
+	struct xcl_mailbox_req req = {0};
+	ssize_t len = sizeof(info);
+	int ret, i;
+	struct xocl_dev *dev = pci_get_drvdata(xdev->pdev);
+
+	/* Get mailbox protocol version */
+	req.req = XCL_MAILBOX_REQ_GET_MBX_PROTOCOL_VERSION;
+	ret = xocl_peer_request(xdev, &req, sizeof(req), &info, &len, NULL,
+				NULL, 0, 0);
+	if (ret)
+		return;
+
+	userpf_info(xdev, "Mailbox protocol version: %u", info.version);
+	xdev->mbx_protocol_version = info.version;
+	xdev->is_mbx_version_valid = true;
+
+	if (info.version == 1) {
+		(void) xocl_vmgmt_refresh_suddevs(dev);
+		return;
+	}
+
+	if (!xdev->wq) {
+		userpf_info(xdev, "Init deferred workers");
+
+		for (i = XOCL_WORK_RESET; i < XOCL_WORK_NUM; i++) {
+			INIT_DELAYED_WORK(&xdev->works[i].work, xocl_work_cb);
+			xdev->works[i].op = i;
+		}
+
+		snprintf(wq_name, sizeof(wq_name), "xocl_wq%d",
+			 xdev->dev_minor);
+		xdev->wq = create_singlethread_workqueue(wq_name);
+		if (!xdev->wq) {
+			userpf_err(xdev, "failed to create work queue");
+			return;
+		}
+	}
+
+	xocl_queue_work(xdev, XOCL_WORK_REFRESH_SUBDEV, 1);
+	/* Waiting for all subdev to be initialized before returning. */
+	flush_delayed_work(&xdev->works[XOCL_WORK_REFRESH_SUBDEV].work);
+}
+
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
 void user_pci_reset_prepare(struct pci_dev *pdev)
@@ -1115,6 +1592,9 @@ static int identify_bar_legacy(struct xocl_dev *xdev)
 				return -EIO;
 			xdev->core.bar_idx = i;
 			xdev->core.bar_size = bar_len;
+			xocl_xdev_info(xdev, "%d Bar index: %d Size: %#x S: %#x",
+					__LINE__, xdev->core.bar_idx,
+					xdev->core.bar_size, xdev->core.bar_addr);
 		}
 	}
 
@@ -1133,6 +1613,7 @@ static int identify_bar_by_dts(struct xocl_dev *xdev)
 	resource_size_t bar_len;
 
 	BUG_ON(!XOCL_DEV_HAS_DEVICE_TREE(xdev));
+	xocl_xdev_info(xdev, "%d", __LINE__);
 
 	ret = xocl_subdev_get_baridx(xdev, NODE_MAILBOX_USER, IORESOURCE_MEM,
 		&bar_id);
@@ -1141,6 +1622,7 @@ static int identify_bar_by_dts(struct xocl_dev *xdev)
 
 	bar_len = pci_resource_len(pdev, bar_id);
 
+	xocl_xdev_info(xdev, "%d", __LINE__);
 	xdev->core.bar_addr = ioremap_nocache(
 		pci_resource_start(pdev, bar_id), bar_len);
 	if (!xdev->core.bar_addr)
@@ -1149,7 +1631,7 @@ static int identify_bar_by_dts(struct xocl_dev *xdev)
 	xdev->core.bar_idx = bar_id;
 	xdev->core.bar_size = bar_len;
 
-	xocl_xdev_info(xdev, "user bar:%d size: %lld", bar_id, bar_len);
+	xocl_xdev_info(xdev, "user bar:%d size: %#x", bar_id, bar_len);
 	return 0;
 }
 
@@ -1230,6 +1712,15 @@ void xocl_userpf_remove(struct pci_dev *pdev)
 	xocl_fini_persist_sysfs(xdev);
 	xocl_fini_sysfs(xdev);
 	xocl_fini_errors(&xdev->core);
+
+	if (xdev->core.is_mbx_version_valid &&
+	    xdev->core.mbx_protocol_version == 1) {
+		platform_device_unregister(xdev->core.rom_platdev);
+		platform_device_unregister(xdev->core.mbx_platdev);
+		platform_device_unregister(xdev->core.icap_platdev);
+		platform_device_unregister(xdev->core.dma_platdev);
+		platform_device_unregister(xdev->core.ert_ctrl_platdev);
+	}
 
 	xocl_subdev_destroy_all(xdev);
 
@@ -1691,12 +2182,25 @@ unlock:
 	return err;
 }
 
+void xocl_mgmt_status_timer(struct timer_list *t)
+{
+	struct xocl_dev_core *xdev = container_of(t, struct xocl_dev_core,
+						  mgmt_status_timer);
+
+	if (xdev->is_mbx_version_valid)
+		return;
+
+	schedule_work(&xdev->mgmt_status_poll);
+
+	/* Respin timer */
+	mod_timer(&xdev->mgmt_status_timer, jiffies + (HZ/10));
+}
+
 int xocl_userpf_probe(struct pci_dev *pdev,
 		const struct pci_device_id *ent)
 {
 	struct xocl_dev			*xdev;
-	char				wq_name[15];
-	int				ret, i;
+	int				ret;
 
 	xdev = xocl_drvinst_alloc(&pdev->dev, sizeof(*xdev));
 	if (!xdev) {
@@ -1734,11 +2238,6 @@ int xocl_userpf_probe(struct pci_dev *pdev,
 		return 0;
 	}
 
-	for (i = XOCL_WORK_RESET; i < XOCL_WORK_NUM; i++) {
-		INIT_DELAYED_WORK(&xdev->core.works[i].work, xocl_work_cb);
-		xdev->core.works[i].op = i;
-	}
-
 	ret = xocl_alloc_dev_minor(xdev);
 	if (ret)
 		goto failed;
@@ -1758,14 +2257,6 @@ int xocl_userpf_probe(struct pci_dev *pdev,
 	ret = xocl_p2p_init(xdev);
 	if (ret) {
 		xocl_err(&pdev->dev, "failed to init p2p memory");
-		goto failed;
-	}
-
-	snprintf(wq_name, sizeof(wq_name), "xocl_wq%d", xdev->core.dev_minor);
-	xdev->core.wq = create_singlethread_workqueue(wq_name);
-	if (!xdev->core.wq) {
-		xocl_err(&pdev->dev, "failed to create work queue");
-		ret = -EFAULT;
 		goto failed;
 	}
 
@@ -1793,9 +2284,11 @@ int xocl_userpf_probe(struct pci_dev *pdev,
 	 */
 	xdev->reset_ert_cus = true;
 
-	xocl_queue_work(xdev, XOCL_WORK_REFRESH_SUBDEV, 1);
-	/* Waiting for all subdev to be initialized before returning. */
-	flush_delayed_work(&xdev->core.works[XOCL_WORK_REFRESH_SUBDEV].work);
+	/* Create timer to poll for mgmt to come online */
+	xdev->core.is_mbx_version_valid = false;
+	timer_setup(&xdev->core.mgmt_status_timer, xocl_mgmt_status_timer, 0);
+	mod_timer(&xdev->core.mgmt_status_timer, jiffies + (HZ/10));
+	INIT_WORK(&xdev->core.mgmt_status_poll, xocl_poll_mgmt_status);
 
 	xdev->mig_cache_expire_secs = XDEV_DEFAULT_EXPIRE_SECS;
 

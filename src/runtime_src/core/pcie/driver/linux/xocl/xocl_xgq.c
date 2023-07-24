@@ -236,6 +236,11 @@ int xocl_xgq_attach(struct xocl_xgq *xgq_handle, void *client, struct semaphore 
 	struct xocl_xgq *xgq = xgq_handle;
 	unsigned long flags = 0;
 
+	if (!xgq) {
+		pr_info("%s:%d", __func__, __LINE__);
+		return -EINVAL;
+	}
+
 	spin_lock_irqsave(&xgq->xx_lock, flags);
 
 	if (xgq->xx_num_client >= MAX_CLIENTS)

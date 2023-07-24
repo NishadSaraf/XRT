@@ -219,8 +219,8 @@ static int xocl_add_context(struct xocl_dev *xdev, struct kds_client *client,
 		client->ctx->xclbin_id = uuid;
 		/* Multiple CU context can be active. Initializing CU context list */
 		INIT_LIST_HEAD(&client->ctx->cu_ctx_list);
-		
-		/* This is required to maintain the command stats per hw context. 
+
+		/* This is required to maintain the command stats per hw context.
 		 * For legacy context case assume there is only one hw context present
 		 * of id 0.
 		 */
@@ -265,7 +265,7 @@ out_cu_ctx:
 	kds_free_cu_ctx(client, cu_ctx);
 
 out_hw_ctx:
-	kds_free_hw_ctx(client, cu_ctx->hw_ctx);	
+	kds_free_hw_ctx(client, cu_ctx->hw_ctx);
 
 out1:
 	/* If client still has no opened context at this point */
@@ -273,7 +273,7 @@ out1:
 	client->ctx->xclbin_id = NULL;
 	/* If we locked the bitstream to this function then we are going
  	 * to free it here.
- 	 */	 
+ 	 */
 	if (bitstream_locked)
 		(void) xocl_icap_unlock_bitstream(xdev, &args->xclbin_id, slot_id);
 
@@ -874,7 +874,7 @@ int xocl_command_ioctl(struct xocl_dev *xdev, void *data,
 		break;
 	case ERT_ACCESS_TEST_C:
 		xcmd->opcode = OP_VALIDATE;
-		break;	
+		break;
 	case ERT_CU_STAT:
 		xcmd->opcode = OP_GET_STAT;
 		xcmd->priv = &XDEV(xdev)->kds;
@@ -1144,7 +1144,7 @@ static int xocl_detect_fa_cmdmem(struct xocl_dev *xdev)
 	/* Detect Fast adapter and descriptor cmdmem
 	 * Assume only one PLRAM would be used for descriptor
 	 */
-	ret = xocl_get_pl_slot(xdev, &slot_id); 
+	ret = xocl_get_pl_slot(xdev, &slot_id);
 	if (ret) {
 		userpf_err(xdev, "Xclbin is not present");
 		return ret;
@@ -1194,7 +1194,7 @@ static int xocl_detect_fa_cmdmem(struct xocl_dev *xdev)
 	 */
 	args.size = size;
 	args.flags = XCL_BO_FLAGS_P2P | mem_idx;
-	args.flags = xocl_bo_set_slot_idx(args.flags, slot_id); 
+	args.flags = xocl_bo_set_slot_idx(args.flags, slot_id);
 	bo = xocl_drm_create_bo(XOCL_DRM(xdev), size, args.flags);
 	if (IS_ERR(bo)) {
 		userpf_err(xdev, "Cannot create bo for fast adapter");
@@ -1569,7 +1569,7 @@ xocl_kds_create_cus(struct xocl_dev *xdev, struct xrt_cu_info *cu_info,
 		subdev_info.priv_data = &cu_info[i];
 		subdev_info.data_len = sizeof(struct xrt_cu_info);
 		subdev_info.override_idx = cu_info[i].inst_idx;
-	
+
 		/* Update slot information to the subdevice. This will help to remove
 		 * subdevice based on slot.
 		 */
@@ -2235,6 +2235,7 @@ static int xocl_kds_update_xgq(struct xocl_dev *xdev, int slot_hdl,
 	int num_scus = 0;
 	int ret = 0;
 	int i = 0;
+	struct xocl_ert_ctrl_funcs *ert_ops;
 
 	cu_info = kzalloc(MAX_CUS * sizeof(struct xrt_cu_info), GFP_KERNEL);
 	if (!cu_info)
@@ -2284,7 +2285,14 @@ static int xocl_kds_update_xgq(struct xocl_dev *xdev, int slot_hdl,
 	if ((major != 1 && major != 2) && minor != 0) {
 		userpf_err(xdev, "Only support ERT XGQ command 1.0 & 2.0\n");
 		ret = -ENOTSUPP;
-		xocl_ert_ctrl_dump(xdev);	/* TODO: remove this line before 2022.2 release */
+		if (xdev->core.ert_ctrl_platdev &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev) &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops) {
+			ert_ops = XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops;
+			ert_ops->dump_xgq(xdev->core.ert_ctrl_platdev);
+		} else {
+			xocl_ert_ctrl_dump(xdev);	/* TODO: remove this line before 2022.2 release */
+		}
 		goto out;
 	}
 
@@ -2328,7 +2336,15 @@ static int xocl_kds_update_xgq(struct xocl_dev *xdev, int slot_hdl,
 		if (ret)
 			goto create_regular_cu;
 
-		xgq = xocl_ert_ctrl_setup_xgq(xdev, resp.xgq_id, resp.offset);
+		if (xdev->core.ert_ctrl_platdev &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev) &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops) {
+			ert_ops = XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops;
+			xgq = ert_ops->setup_xgq(xdev->core.ert_ctrl_platdev,
+						 resp.xgq_id, resp.offset);
+		} else {
+			xgq = xocl_ert_ctrl_setup_xgq(xdev, resp.xgq_id, resp.offset);
+		}
 		if (IS_ERR(xgq)) {
 			userpf_err(xdev, "Setup XGQ failed\n");
 			ret = PTR_ERR(xgq);
@@ -2348,7 +2364,15 @@ static int xocl_kds_update_xgq(struct xocl_dev *xdev, int slot_hdl,
 		if (ret)
 			goto create_regular_cu;
 
-		xgq = xocl_ert_ctrl_setup_xgq(xdev, resp.xgq_id, resp.offset);
+		if (xdev->core.ert_ctrl_platdev &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev) &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops) {
+			ert_ops = XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops;
+			xgq = ert_ops->setup_xgq(xdev->core.ert_ctrl_platdev,
+						 resp.xgq_id, resp.offset);
+		} else {
+			xgq = xocl_ert_ctrl_setup_xgq(xdev, resp.xgq_id, resp.offset);
+		}
 		if (IS_ERR(xgq)) {
 			userpf_err(xdev, "Setup XGQ failed\n");
 			ret = PTR_ERR(xgq);
@@ -2423,28 +2447,60 @@ int xocl_kds_register_cus(struct xocl_dev *xdev, int slot_hdl, xuid_t *uuid,
 			  struct ps_kernel_node *ps_kernel)
 {
 	int ret = 0;
+	struct xocl_ert_ctrl_funcs *ert_ops;
 
 	XDEV(xdev)->kds.xgq_enable = false;
-	ret = xocl_ert_ctrl_connect(xdev);
-	if (ret == -ENODEV) {
-		userpf_info(xdev, "ERT will be disabled, ret %d\n", ret);
-		XDEV(xdev)->kds.ert_disable = true;
-	} else if (ret < 0) {
-		userpf_info(xdev, "ERT connect failed, ret %d\n", ret);
-		ret = -EINVAL;
-		goto out;
-	}
 
-	/* Try config legacy ERT firmware */
-	if (!xocl_ert_ctrl_is_version(xdev, 1, 0)) {
-		if (slot_hdl) {
-			userpf_err(xdev, "legacy ERT only support one xclbin\n");
+	if (xdev->core.ert_ctrl_platdev &&
+	    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev) &&
+	    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops) {
+		ert_ops = XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops;
+		ret = ert_ops->connect(xdev->core.ert_ctrl_platdev);
+		if (ret == -ENODEV) {
+			userpf_info(xdev, "ERT will be disabled, ret %d\n", ret);
+			XDEV(xdev)->kds.ert_disable = true;
+		} else if (ret < 0) {
+			userpf_info(xdev, "ERT connect failed, ret %d\n", ret);
 			ret = -EINVAL;
 			goto out;
 		}
-		ret = xocl_kds_update_legacy(xdev, XDEV(xdev)->axlf_obj[slot_hdl]->kds_cfg,
-			       ip_layout, ps_kernel);
-		goto out;
+	} else {
+		ret = xocl_ert_ctrl_connect(xdev);
+		if (ret == -ENODEV) {
+			userpf_info(xdev, "ERT will be disabled, ret %d\n", ret);
+			XDEV(xdev)->kds.ert_disable = true;
+		} else if (ret < 0) {
+			userpf_info(xdev, "ERT connect failed, ret %d\n", ret);
+			ret = -EINVAL;
+			goto out;
+		}
+	}
+
+	/* Try config legacy ERT firmware */
+	if (xdev->core.ert_ctrl_platdev &&
+	    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev) &&
+	    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops) {
+		if (!ert_ops->is_version(xdev->core.ert_ctrl_platdev, 1, 0)) {
+			if (slot_hdl) {
+				userpf_err(xdev, "legacy ERT only support one xclbin\n");
+				ret = -EINVAL;
+				goto out;
+			}
+			ret = xocl_kds_update_legacy(xdev, XDEV(xdev)->axlf_obj[slot_hdl]->kds_cfg,
+				       ip_layout, ps_kernel);
+			goto out;
+		}
+	} else {
+		if (!xocl_ert_ctrl_is_version(xdev, 1, 0)) {
+			if (slot_hdl) {
+				userpf_err(xdev, "legacy ERT only support one xclbin\n");
+				ret = -EINVAL;
+				goto out;
+			}
+			ret = xocl_kds_update_legacy(xdev, XDEV(xdev)->axlf_obj[slot_hdl]->kds_cfg,
+				       ip_layout, ps_kernel);
+			goto out;
+		}
 	}
 
 	ret = xocl_kds_update_xgq(xdev, slot_hdl, uuid,
@@ -2463,20 +2519,41 @@ int xocl_kds_unregister_cus(struct xocl_dev *xdev, int slot_hdl)
 	int i = 0;
 	struct xrt_cu *xcu = NULL;
 	struct kds_cu_mgmt *cu_mgmt = NULL;
+	struct xocl_ert_ctrl_funcs *ert_ops;
 
 	XDEV(xdev)->kds.xgq_enable = false;
-	ret = xocl_ert_ctrl_connect(xdev);
-	if (ret) {
-		userpf_info_once(xdev, "ERT will be disabled, ret %d\n", ret);
-		XDEV(xdev)->kds.ert_disable = true;
-		return ret;
+
+	if (xdev->core.ert_ctrl_platdev &&
+	    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev) &&
+	    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops) {
+		ert_ops = XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops;
+		ret = ert_ops->connect(xdev->core.ert_ctrl_platdev);
+		if (ret) {
+			userpf_info_once(xdev, "ERT will be disabled, ret %d\n", ret);
+			XDEV(xdev)->kds.ert_disable = true;
+			return ret;
+		}
+
+		if (XDEV(xdev)->kds.ert_disable == true)
+			return ret;
+
+		if (!ert_ops->is_version(xdev->core.ert_ctrl_platdev, 1, 0))
+			return ret;
+
+	} else {
+		ret = xocl_ert_ctrl_connect(xdev);
+		if (ret) {
+			userpf_info_once(xdev, "ERT will be disabled, ret %d\n", ret);
+			XDEV(xdev)->kds.ert_disable = true;
+			return ret;
+		}
+
+		if (XDEV(xdev)->kds.ert_disable == true)
+			return ret;
+
+		if (!xocl_ert_ctrl_is_version(xdev, 1, 0))
+			return ret;
 	}
-
-	if (XDEV(xdev)->kds.ert_disable == true)
-		return ret;
-
-	if (!xocl_ert_ctrl_is_version(xdev, 1, 0))
-		return ret;
 
 	/*
 	 * The XGQ Identify command is used to identify the version of firmware which
@@ -2493,7 +2570,7 @@ int xocl_kds_unregister_cus(struct xocl_dev *xdev, int slot_hdl)
 	if (major == 2 && minor == 0) {
 		if (xdev->reset_ert_cus) {
 			/* This is done only for the first time after xocl driver load.
-			 * Before configuring/unconfiguring CUs/SCUs XOCL driver will make 
+			 * Before configuring/unconfiguring CUs/SCUs XOCL driver will make
 			 * sure ERT is in good know status before configure it for the first
 			 * time.
 			 */
@@ -2501,8 +2578,8 @@ int xocl_kds_unregister_cus(struct xocl_dev *xdev, int slot_hdl)
 			if (ret)
 				goto out;
 
-			ret = xocl_kds_xgq_query_mem(xdev, &XOCL_DRM(xdev)->ps_mem_data); 
-			if (ret) 
+			ret = xocl_kds_xgq_query_mem(xdev, &XOCL_DRM(xdev)->ps_mem_data);
+			if (ret)
 				userpf_info(xdev, "WARN ! Device doesn't configure for PS Kernel memory\n");
 
 			xdev->reset_ert_cus = false;
@@ -2530,7 +2607,14 @@ int xocl_kds_unregister_cus(struct xocl_dev *xdev, int slot_hdl)
 				goto out;
 		}
 
-		xocl_ert_ctrl_unset_xgq(xdev, xcu->info.xgq);
+		if (xdev->core.ert_ctrl_platdev &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev) &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops) {
+			ert_ops->unset_xgq(xdev->core.ert_ctrl_platdev,
+					   xcu->info.xgq);
+		} else {
+			xocl_ert_ctrl_unset_xgq(xdev, xcu->info.xgq);
+		}
 	}
 
 	cu_mgmt = &XDEV(xdev)->kds.cu_mgmt;
@@ -2550,7 +2634,14 @@ int xocl_kds_unregister_cus(struct xocl_dev *xdev, int slot_hdl)
 				goto out;
 		}
 
-		xocl_ert_ctrl_unset_xgq(xdev, xcu->info.xgq);
+		if (xdev->core.ert_ctrl_platdev &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev) &&
+		    XOCL_GET_DRV_PRI(xdev->core.ert_ctrl_platdev)->ops) {
+			ert_ops->unset_xgq(xdev->core.ert_ctrl_platdev,
+					   xcu->info.xgq);
+		} else {
+			xocl_ert_ctrl_unset_xgq(xdev, xcu->info.xgq);
+		}
 	}
 
 	ret = xocl_kds_xgq_cfg_end(xdev);

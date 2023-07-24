@@ -803,12 +803,25 @@ int xocl_mm_insert_node(struct xocl_drm *drm_p, unsigned memidx,
 	struct drm_mm_node *node = xobj->mm_node;
 	struct xocl_mem_stat *curr_mem = NULL;
 	struct mem_topology *grp_topology = NULL;
+	struct xocl_icap_funcs *icap_ops;
+	struct xocl_dev *xdev = drm_p->xdev;
+	struct xocl_dev_core *core = &xdev->core;
 
 	BUG_ON(!mutex_is_locked(&drm_p->mm_lock));
         if (drm_p->xocl_mm->mm == NULL)
                 return -EINVAL;
 
-	ret = XOCL_GET_GROUP_TOPOLOGY(drm_p->xdev, grp_topology, slotidx);
+	if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+	    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+		icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+		ret = icap_ops->get_xclbin_metadata(core->icap_platdev,
+						    GROUPTOPO_AXLF,
+						    (void **)&grp_topology,
+						    slotidx);
+	} else {
+		ret = XOCL_GET_GROUP_TOPOLOGY(drm_p->xdev, grp_topology,
+					      slotidx);
+	}
         if (ret)
                 return 0;
 
@@ -825,7 +838,13 @@ int xocl_mm_insert_node(struct xocl_drm *drm_p, unsigned memidx,
 				&grp_topology->m_mem_data[memidx], node, size);
 	}
 
-        XOCL_PUT_GROUP_TOPOLOGY(drm_p->xdev, slotidx);
+	if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+	    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+		icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+		icap_ops->put_xclbin_metadata(core->icap_platdev, slotidx);
+	} else {
+		XOCL_PUT_GROUP_TOPOLOGY(drm_p->xdev, slotidx);
+	}
 	if (!ret) {
 		/* Update memory manager stats for whole device */
 		xocl_mm_update_usage_stat(drm_p,
@@ -1092,6 +1111,9 @@ int xocl_init_mem(struct xocl_drm *drm_p, uint32_t slot_id)
 	uint64_t reserved_end;
 	int err = 0;
 	int i = -1;
+	struct xocl_icap_funcs *icap_ops;
+	struct xocl_dev *xdev = drm_p->xdev;
+	struct xocl_dev_core *core = &xdev->core;
 
 	if (XOCL_DSA_IS_MPSOC(drm_p->xdev)) {
 		/* TODO: This is still hardcoding.. */
@@ -1103,7 +1125,16 @@ int xocl_init_mem(struct xocl_drm *drm_p, uint32_t slot_id)
 	drm_p->cma_bank_idx = -1;
 
 	/* Initialize memory stats based on Group topology for this xclbin */
-	err = XOCL_GET_GROUP_TOPOLOGY(drm_p->xdev, group_topo, slot_id);
+	if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+	    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+		icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+		err = icap_ops->get_xclbin_metadata(core->icap_platdev,
+						    GROUPTOPO_AXLF,
+						    (void **)&group_topo,
+						    slot_id);
+	} else {
+		err = XOCL_GET_GROUP_TOPOLOGY(drm_p->xdev, group_topo, slot_id);
+	}
 	if (err) {
 		mutex_unlock(&drm_p->mm_lock);
 		return err;
@@ -1177,7 +1208,13 @@ int xocl_init_mem(struct xocl_drm *drm_p, uint32_t slot_id)
 	}
 
 done:
-	XOCL_PUT_GROUP_TOPOLOGY(drm_p->xdev, slot_id);
+	if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+	    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+		icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+		icap_ops->put_xclbin_metadata(core->icap_platdev, slot_id);
+	} else {
+		XOCL_PUT_GROUP_TOPOLOGY(drm_p->xdev, slot_id);
+	}
 
 	if (err)
 		xocl_cleanup_mem_nolock(drm_p, slot_id);

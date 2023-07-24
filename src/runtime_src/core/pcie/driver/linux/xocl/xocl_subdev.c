@@ -257,10 +257,13 @@ static struct xocl_subdev_info *xocl_subdev_get_info(xdev_handle_t xdev_hdl,
 	if (!subdev_info)
 		return NULL;
 
+	xocl_xdev_info(xdev_hdl, "%d subdev dyn: %d num: %d", __LINE__,
+			core->dyn_subdev_num, core->priv.subdev_num);
 	/* construct subdevice info array */
-	for (i = 0; i < core->priv.subdev_num; i++)
+	for (i = 0; i < core->priv.subdev_num; i++) {
 		xocl_subdev_update_info(core, subdev_info, &subdev_num,
 				&core->priv.subdev_info[i]);
+	}
 
 	for (i = 0; i < core->dyn_subdev_num; i++) {
 		if (core->dyn_subdev_store[i].pf != XOCL_PCI_FUNC(core))
@@ -448,7 +451,7 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 	else
 		snprintf(devname, sizeof(devname) - 1, "%s%s",
 			subdev->info.name, SUBDEV_SUFFIX);
-	xocl_xdev_dbg(xdev_hdl, "creating subdev %s multi %d level %d",
+	xocl_xdev_info(xdev_hdl, "creating subdev %s multi %d level %d",
 		devname, subdev->info.multi_inst, subdev->info.level);
 
 	subdev->pldev = platform_device_alloc(devname, subdev->inst);
@@ -460,6 +463,7 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 	}
 
 	if (subdev->info.num_res > 0) {
+		xocl_xdev_info(xdev_hdl, "Total num res: %d", subdev->info.num_res);
 		res = vzalloc(sizeof (*res) * subdev->info.num_res);
 		if (!res) {
 			retval = -ENOMEM;
@@ -467,6 +471,8 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 		}
 		memcpy(res, subdev->res, sizeof(*res) * subdev->info.num_res);
 		for (i = 0; i < subdev->info.num_res; i++) {
+			//xocl_xdev_info(xdev_hdl, "resource %pR %s %d %d", &res[i],
+			//		res[i].name, res[i].start, res[i].end);
 			if (!(res[i].flags & IORESOURCE_MEM))
 				continue;
 
@@ -494,12 +500,25 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 				bar_start = core->bars[bar_idx].base_addr;
 				bar_end = core->bars[bar_idx].base_addr +
 						core->bars[bar_idx].range - 1;
+				xocl_xdev_info(xdev_hdl, "bar start: %#llx bar end: %#llx",
+						bar_start, bar_end);
+				if((bar_start <= res[i].start) &&
+						(res[i].end <= bar_end)) {
+					res[i].start -= bar_start;
+					res[i].end -= bar_start;
+				}
+			} else {
+				bar_start = 0x20200000000;
+				bar_end = 0x20207ffffff;
+				xocl_xdev_info(xdev_hdl, "bar start: %#llx bar end: %#llx",
+						bar_start, bar_end);
 				if((bar_start <= res[i].start) &&
 						(res[i].end <= bar_end)) {
 					res[i].start -= bar_start;
 					res[i].end -= bar_start;
 				}
 			}
+
 			iostart = pci_resource_start(core->pdev, bar_idx);
 			res[i].start += iostart;
 			if (!res[i].end) {
@@ -513,7 +532,8 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 			 * resource tree.
 			 */
 			res[i].parent = &(core->pdev->resource[bar_idx]);
-			xocl_xdev_dbg(xdev_hdl, "resource %pR", &res[i]);
+			xocl_xdev_info(xdev_hdl, "resource %pR bar idx: %d",
+					&res[i], bar_idx);
 		}
 
 		retval = platform_device_add_resources(subdev->pldev,
@@ -525,6 +545,7 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 	}
 
 	if (subdev->info.dyn_ip > 0) {
+		xocl_xdev_info(xdev_hdl, "subdev %s has dyn ip", devname);
 		retval = xocl_fdt_build_priv_data(xdev_hdl, subdev,
 				&priv_data, &data_len);
 		if (retval) {
@@ -534,6 +555,8 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 	}
 
 	if (!priv_data) {
+		xocl_xdev_info(xdev_hdl, "subdev %s didn't find priv data in fdt",
+				devname);
 		priv_data = vzalloc(subdev->info.data_len + sizeof(*priv_data));
 		if (!priv_data) {
 			retval = -ENOMEM;
@@ -542,6 +565,8 @@ static int __xocl_subdev_construct(xdev_handle_t xdev_hdl,
 		data_len = subdev->info.data_len;
 		if (data_len)
 			memcpy(priv_data->data, subdev->info.priv_data, data_len);
+		xocl_xdev_info(xdev_hdl, "subdev %s copied %d len of priv data",
+				devname, data_len);
 	}
 
 	reg.name = subdev->info.name;
@@ -927,18 +952,23 @@ int xocl_subdev_create_all(xdev_handle_t xdev_hdl)
 	int	i, ret = 0, subdev_num = 0;
 	struct xocl_subdev_info *subdev_info = NULL;
 
+			xocl_xdev_info(xdev_hdl, "%d",__LINE__);
 	xocl_lock_xdev(xdev_hdl);
 	if (!(core->priv.flags & XOCL_DSAFLAG_DYNAMIC_IP)) {
+			xocl_xdev_info(xdev_hdl, "%d",__LINE__);
 		if (core->dyn_subdev_num + core->priv.subdev_num == 0)
 			goto failed;
 
+		xocl_xdev_info(xdev_hdl, "%d",__LINE__);
 		/* lookup update table */
 		ret = __xocl_subdev_create_by_id(xdev_hdl, XOCL_SUBDEV_FEATURE_ROM);
 		if (!ret) {
+			xocl_xdev_info(xdev_hdl, "%d",__LINE__);
 			xocl_get_raw_header(core, &rom);
 			for (i = 0; i < ARRAY_SIZE(dsa_map); i++) {
 				if (!dsa_map[i].type != XOCL_DSAMAP_VBNV)
 					continue;
+			xocl_xdev_info(xdev_hdl, "%d",__LINE__);
 				if ((core->pdev->vendor == dsa_map[i].vendor ||
 					dsa_map[i].vendor == (u16)PCI_ANY_ID) &&
 					(core->pdev->device == dsa_map[i].device ||
@@ -948,6 +978,7 @@ int xocl_subdev_create_all(xdev_handle_t xdev_hdl)
 					dsa_map[i].subdevice == (u16)PCI_ANY_ID) &&
 					!strncmp(rom.VBNVName, dsa_map[i].vbnv,
 					sizeof(rom.VBNVName))) {
+					xocl_xdev_info(xdev_hdl, "%d",__LINE__);
 					xocl_fill_dsa_priv(xdev_hdl, dsa_map[i].priv_data);
 					break;
 				}
@@ -955,10 +986,12 @@ int xocl_subdev_create_all(xdev_handle_t xdev_hdl)
 		}
 	}
 
+	xocl_xdev_info(xdev_hdl, "%d",__LINE__);
 	subdev_info = xocl_subdev_get_info(xdev_hdl, &subdev_num);
 
 	/* create subdevices */
 	for (i = 0; i < subdev_num; i++) {
+		xocl_xdev_info(xdev_hdl, "%d",__LINE__);
 		ret = __xocl_subdev_create(xdev_hdl, &subdev_info[i]);
 		if (ret && ret != -EEXIST && ret != -EAGAIN)
 			goto failed;

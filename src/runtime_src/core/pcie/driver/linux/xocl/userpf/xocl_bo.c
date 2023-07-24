@@ -282,28 +282,43 @@ static inline int check_bo_user_reqs(const struct drm_device *dev,
 	int err = 0;
 	unsigned ddr = xocl_bo_ddr_idx(flags);
 	uint32_t slot_id = xocl_bo_slot_idx(flags);
+	struct xocl_icap_funcs *icap_ops;
+	struct xocl_dev_core *core = &xdev->core;
 
+	userpf_info(xdev, "%d", __LINE__);
 	if (type == XOCL_BO_EXECBUF || type == XOCL_BO_IMPORT ||
 	    type == XOCL_BO_CMA)
 		return 0;
 	//From "mem_topology" or "feature rom" depending on
 	//unified or non-unified dsa
 
-	err = XOCL_GET_GROUP_TOPOLOGY(xdev, topo, slot_id);
+	userpf_info(xdev, "%d", __LINE__);
+	if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+	    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+		icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+		err = icap_ops->get_xclbin_metadata(core->icap_platdev,
+						    GROUPTOPO_AXLF,
+						    (void **)&topo, slot_id);
+	} else {
+		err = XOCL_GET_GROUP_TOPOLOGY(xdev, topo, slot_id);
+	}
 	if (err)
 		return err;
 
+	userpf_info(xdev, "%d", __LINE__);
 	if (topo) {
 		if (XOCL_IS_PS_KERNEL_MEM(topo, ddr)) {
 			err = 0;
 			goto done;
 		}
+	userpf_info(xdev, "%d", __LINE__);
 
 		if (XOCL_IS_STREAM(topo, ddr)) {
 			userpf_err(xdev, "Bank %d is Stream", ddr);
 			err = -EINVAL;
 			goto done;
 		}
+	userpf_info(xdev, "%d", __LINE__);
 		if (!XOCL_IS_DDR_USED(topo, ddr)) {
 			userpf_err(xdev,
 				   "Bank %d is marked as unused in axlf", ddr);
@@ -312,15 +327,24 @@ static inline int check_bo_user_reqs(const struct drm_device *dev,
 		}
 	}
 
+	userpf_info(xdev, "%d", __LINE__);
 	ddr_count = XOCL_DDR_COUNT(xdev, slot_id);
 	if (ddr_count == 0)
 		return -EINVAL;
 
+	userpf_info(xdev, "%d", __LINE__);
 	if (ddr >= ddr_count)
 		return -EINVAL;
 
+	userpf_info(xdev, "%d", __LINE__);
 done:
-	XOCL_PUT_GROUP_TOPOLOGY(xdev, slot_id);
+	if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+	    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+		icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+		icap_ops->put_xclbin_metadata(core->icap_platdev, slot_id);
+	} else {
+		XOCL_PUT_GROUP_TOPOLOGY(xdev, slot_id);
+	}
 	return err;
 }
 
@@ -389,21 +413,25 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 	bool xobj_inited = false;
 	int err = 0;
 
+	userpf_info(xdev, "%d", __LINE__);
 	BO_DEBUG("New create bo flags:%x, type %x", user_flags, bo_type);
 	if (!size)
 		return ERR_PTR(-EINVAL);
 
+	userpf_info(xdev, "%d", __LINE__);
 	/* Either none or only one DDR should be specified */
 	/* Check the bo_type */
 	if (check_bo_user_reqs(dev, user_flags, bo_type))
 		return ERR_PTR(-EINVAL);
 
+	userpf_info(xdev, "%d", __LINE__);
 	xobj = kzalloc(sizeof(*xobj), GFP_KERNEL);
 	if (!xobj)
 		return ERR_PTR(-ENOMEM);
 
 	BO_ENTER("xobj %p", xobj);
 
+	userpf_info(xdev, "%d", __LINE__);
 	xobj->user_flags = user_flags;
 	xobj->flags = bo_type;
 	mutex_lock(&drm_p->mm_lock);
@@ -419,10 +447,14 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 		}
 		memidx = drm_p->cma_bank_idx;
 	}
+	userpf_info(xdev, "%d", __LINE__);
 
+#if 1
 	if (memidx == drm_p->cma_bank_idx) {
+	userpf_info(xdev, "%d", __LINE__);
 		if (xobj->flags &
 		    (XOCL_USER_MEM | XOCL_DRM_IMPORT | XOCL_P2P_MEM)) {
+	userpf_info(xdev, "%d", __LINE__);
 			err = -EINVAL;
 			xocl_xdev_err(xdev, "invalid HOST BO req. flag %x",
 				xobj->flags);
@@ -430,16 +462,20 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 		}
 		xobj->flags = XOCL_BO_CMA;
 	}
-
-	if (xobj->flags == XOCL_BO_EXECBUF)
+#endif
+	if (xobj->flags == XOCL_BO_EXECBUF) {
+		userpf_info(xdev, "%d", __LINE__);
 		xobj->metadata.state = DRM_XOCL_EXECBUF_STATE_ABORT;
+	}
 
 	obj = &xobj->base;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 11, 0) || defined(RHEL_8_5_GE)
 	obj->funcs = &xocl_gem_object_funcs;
 #endif
 
+	userpf_info(xdev, "%d", __LINE__);
 	if (xobj->flags & XOCL_DRM_SHMEM) {
+		userpf_info(xdev, "%d", __LINE__);
 		err = drm_gem_object_init(dev, obj, size);
 		if (err)
 			goto failed;
@@ -447,6 +483,7 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 		drm_gem_private_object_init(dev, obj, size);
 
 	xobj_inited = true;
+	userpf_info(xdev, "%d", __LINE__);
 
 	if (!(xobj->flags & XOCL_DEVICE_MEM) && !(xobj->flags & XOCL_CMA_MEM))
 		goto done;
@@ -458,19 +495,22 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 		goto failed;
 	}
 
+	userpf_info(xdev, "%d", __LINE__);
 	/* Attempt to allocate buffer on the requested DDR */
-	xocl_xdev_dbg(xdev, "alloc bo from bank%u, flag %x, host bank %d",
+	xocl_xdev_info(xdev, "alloc bo from bank%u, flag %x, host bank %d",
 		memidx, xobj->flags, drm_p->cma_bank_idx);
 
 	err = xocl_mm_insert_node(drm_p, memidx, slotidx, xobj,
 		xobj->base.size);
 	if (err)
 		goto failed;
+	userpf_info(xdev, "%d", __LINE__);
 
 	BO_DEBUG("insert mm_node:%p, start:%llx size: %llx",
 		xobj->mm_node, xobj->mm_node->start,
 		xobj->mm_node->size);
 	xocl_bo_update_usage_stat(drm_p, xobj->flags, xobj->base.size, 1);
+	userpf_info(xdev, "%d", __LINE__);
 
 done:
 	mutex_unlock(&drm_p->mm_lock);
@@ -558,6 +598,8 @@ __xocl_create_bo_ioctl(struct drm_device *dev, struct drm_file *filp,
 	uint32_t hw_ctx_id = 0;
 	uint32_t slot_id = 0;
 	int ret;
+	struct xocl_icap_funcs *icap_ops;
+	struct xocl_dev_core *core = &xdev->core;
 
 	if (bo_type != XOCL_BO_EXECBUF) {
 		/* Currently userspace will provide the corresponding hw context id.
@@ -589,7 +631,15 @@ __xocl_create_bo_ioctl(struct drm_device *dev, struct drm_file *filp,
 		 * DRM allocate contiguous pages, shift the vmapping with
 		 * bar address offset
 		 */
-		ret = XOCL_GET_GROUP_TOPOLOGY(xdev, topo, slot_id);
+		if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+		    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+			icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+			ret = icap_ops->get_xclbin_metadata(core->icap_platdev,
+							    GROUPTOPO_AXLF,
+							    (void **)&topo, slot_id);
+		} else {
+			ret = XOCL_GET_GROUP_TOPOLOGY(xdev, topo, slot_id);
+		}
 		if (ret)
 			goto out_free;
 
@@ -611,7 +661,13 @@ __xocl_create_bo_ioctl(struct drm_device *dev, struct drm_file *filp,
 				xobj->p2p_bar_offset = bar_off;
 		}
 
-		XOCL_PUT_GROUP_TOPOLOGY(xdev, slot_id);
+		if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+		    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+			icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+			icap_ops->put_xclbin_metadata(core->icap_platdev, slot_id);
+		} else {
+			XOCL_PUT_GROUP_TOPOLOGY(xdev, slot_id);
+		}
 	}
 
 	if (xobj->flags & XOCL_PAGE_ALLOC) {
@@ -623,12 +679,27 @@ __xocl_create_bo_ioctl(struct drm_device *dev, struct drm_file *filp,
 		else if (xobj->flags & XOCL_CMA_MEM) {
 			uint64_t start_addr;
 
-			ret = XOCL_GET_GROUP_TOPOLOGY(xdev, topo, slot_id);
+			if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+			    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+				icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+				ret = icap_ops->get_xclbin_metadata(core->icap_platdev,
+								    GROUPTOPO_AXLF,
+								    (void **)&topo, slot_id);
+			} else {
+				ret = XOCL_GET_GROUP_TOPOLOGY(xdev, topo, slot_id);
+			}
 			if (ret)
 				goto out_free;
 			start_addr = topo->m_mem_data[ddr].m_base_address;
 			xobj->pages = xocl_cma_collect_pages(drm_p, start_addr, xobj->mm_node->start, xobj->base.size);
-			XOCL_PUT_GROUP_TOPOLOGY(xdev, slot_id);
+
+			if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
+			    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
+				icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
+				icap_ops->put_xclbin_metadata(core->icap_platdev, slot_id);
+			} else {
+				XOCL_PUT_GROUP_TOPOLOGY(xdev, slot_id);
+			}
 		}
 
 		if (IS_ERR(xobj->pages)) {
@@ -848,6 +919,7 @@ int xocl_sync_bo_ioctl(struct drm_device *dev,
 	struct xocl_drm *drm_p = dev->dev_private;
 	struct xocl_dev *xdev = drm_p->xdev;
 	struct scatterlist *sg;
+	struct xocl_dma_funcs *dma_ops;
 
 	u32 dir = (args->dir == DRM_XOCL_SYNC_BO_TO_DEVICE) ? 1 : 0;
 	struct drm_gem_object *gem_obj = xocl_gem_object_lookup(dev, filp,
@@ -918,18 +990,41 @@ int xocl_sync_bo_ioctl(struct drm_device *dev,
 	}
 
 	//drm_clflush_sg(sgt);
-	channel = xocl_acquire_channel(xdev, dir);
+	if (xdev->core.dma_platdev &&
+	    XOCL_GET_DRV_PRI(xdev->core.dma_platdev) &&
+	    XOCL_GET_DRV_PRI(xdev->core.dma_platdev)->ops) {
+		dma_ops = XOCL_GET_DRV_PRI(xdev->core.dma_platdev)->ops;
+		channel = dma_ops->ac_chan(xdev->core.dma_platdev, dir);
+	} else {
+		channel = xocl_acquire_channel(xdev, dir);
+	}
 	if (channel < 0) {
 		DRM_ERROR("BO %d request cannot find channel.\n", args->handle);
 		ret = -EINVAL;
 		goto clear;
 	}
 	/* Now perform DMA */
-	ret = xocl_migrate_bo(xdev, sgt, dir, paddr, channel, args->size);
+	if (xdev->core.dma_platdev &&
+	    XOCL_GET_DRV_PRI(xdev->core.dma_platdev) &&
+	    XOCL_GET_DRV_PRI(xdev->core.dma_platdev)->ops) {
+		dma_ops = XOCL_GET_DRV_PRI(xdev->core.dma_platdev)->ops;
+		ret = dma_ops->migrate_bo(xdev->core.dma_platdev, sgt, dir,
+					  paddr, channel, args->size);
+	} else {
+		ret = xocl_migrate_bo(xdev, sgt, dir, paddr, channel,
+				      args->size);
+	}
 	if (ret >= 0)
 		ret = (ret == args->size) ? 0 : -EIO;
 
-	xocl_release_channel(xdev, dir, channel);
+	if (xdev->core.dma_platdev &&
+	    XOCL_GET_DRV_PRI(xdev->core.dma_platdev) &&
+	    XOCL_GET_DRV_PRI(xdev->core.dma_platdev)->ops) {
+		dma_ops = XOCL_GET_DRV_PRI(xdev->core.dma_platdev)->ops;
+		dma_ops->rel_chan(xdev->core.dma_platdev, dir, channel);
+	} else {
+		xocl_release_channel(xdev, dir, channel);
+	}
 clear:
 	if (args->offset || (args->size != xobj->base.size)) {
 		sg_free_table(sgt);
