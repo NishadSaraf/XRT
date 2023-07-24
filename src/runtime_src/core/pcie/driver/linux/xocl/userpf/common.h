@@ -222,6 +222,8 @@ static inline u64 xocl_pci_rebar_size_to_bytes(int size)
 
 int xocl_read_axlf_helper(struct xocl_drm *drm_p, struct drm_xocl_axlf *axlf_ptr,
 	                     uint32_t qos, uint32_t *slot_id);
+int xocl_vmgmt_read_axlf_helper(struct xocl_drm *drm_p, struct drm_xocl_axlf *axlf_ptr,
+	                     uint32_t qos, xuid_t *uid, uint32_t *slot_id);
 
 /* KDS functions */
 int xocl_init_sched(struct xocl_dev *xdev);
@@ -235,6 +237,9 @@ int xocl_get_slot_id_by_hw_ctx_id(struct xocl_dev *xdev,
 		struct drm_file *filp, uint32_t hw_ctx_id);
 int xocl_create_hw_context(struct xocl_dev *xdev, struct drm_file *filp,
                 struct drm_xocl_create_hw_ctx *hw_ctx_args, uint32_t slot_id);
+int xocl_vmgmt_create_hw_context(struct xocl_dev *xdev, struct drm_file *filp,
+                struct drm_xocl_create_hw_ctx *hw_ctx_args, xuid_t *uid,
+		uint32_t slot_id);
 int xocl_destroy_hw_context(struct xocl_dev *xdev, struct drm_file *filp,
                 struct drm_xocl_destroy_hw_ctx *hw_ctx_args);
 int xocl_open_cu_context(struct xocl_dev *xdev, struct drm_file *filp,
