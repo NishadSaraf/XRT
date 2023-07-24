@@ -124,7 +124,7 @@
                 #define XOCL_DRM_GEM_OBJECT_GET drm_gem_object_get
 	#endif
 #elif defined(RHEL_RELEASE_CODE)
-	#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(7,5) 
+	#if RHEL_RELEASE_CODE >= RHEL_RELEASE_VERSION(7,5)
 		#define XOCL_DRM_GEM_OBJECT_PUT_UNLOCKED drm_gem_object_put_unlocked
 		#define XOCL_DRM_GEM_OBJECT_GET drm_gem_object_get
 	#else
@@ -577,7 +577,7 @@ struct xocl_axlf_obj_cache {
 	/* Private fields */
 	uint32_t                idx;
 
-	/* Xclbin specific fileds */	
+	/* Xclbin specific fileds */
 	void                    *ulp_blob;
 
 	/*
@@ -653,6 +653,11 @@ struct xocl_dev_core {
 
 	/* XOCL Should cache some of the information shared in IOCTL */
 	struct xocl_axlf_obj_cache *axlf_obj[MAX_SLOT_SUPPORT];
+
+	struct timer_list	mgmt_status_timer;
+	struct work_struct	mgmt_status_poll;
+	u32			mbx_protocol_version;
+	bool			is_mbx_version_valid;
 };
 
 #define XOCL_DRM(xdev_hdl)					\
@@ -1605,7 +1610,7 @@ static inline u32 xocl_ddr_count_unified(xdev_handle_t xdev_hdl,
 	(topo->m_mem_data[idx].m_type == MEM_STREAMING || \
 	 topo->m_mem_data[idx].m_type == MEM_STREAMING_CONNECTION)
 #define XOCL_IS_PS_KERNEL_MEM(topo, idx)				\
-	(topo->m_mem_data[idx].m_type == MEM_PS_KERNEL) 
+	(topo->m_mem_data[idx].m_type == MEM_PS_KERNEL)
 #define XOCL_IS_P2P_MEM(topo, idx)					\
 	((topo->m_mem_data[idx].m_type == MEM_DDR3 ||			\
 	 topo->m_mem_data[idx].m_type == MEM_DDR4 ||			\
@@ -2115,7 +2120,7 @@ static inline struct kernel_info *
 xocl_query_kernel(xdev_handle_t xdev_hdl, const char *name, uint32_t slot_id)
 {
 	struct xocl_dev_core *xdev = XDEV(xdev_hdl);
-	struct xocl_axlf_obj_cache *axlf_obj = xdev->axlf_obj[slot_id]; 
+	struct xocl_axlf_obj_cache *axlf_obj = xdev->axlf_obj[slot_id];
 	struct kernel_info *kernel;
 	int off = 0;
 
@@ -2286,7 +2291,7 @@ struct xocl_sdm_funcs {
 #define	xocl_hwmon_sdm_create_sensors_sysfs(xdev, buf, size, kind)		\
 	(SDM_CB(xdev, hwmon_sdm_create_sensors_sysfs) ?			\
 	SDM_OPS(xdev)->hwmon_sdm_create_sensors_sysfs(SDM_DEV(xdev), buf, size, kind) : -ENODEV)
- 
+
 /* subdev mbx messages */
 #define XOCL_MSG_SUBDEV_VER	1
 #define XOCL_MSG_SUBDEV_DATA_LEN	(512 * 1024)
@@ -2410,7 +2415,7 @@ struct xocl_pcie_firewall_funcs {
 	(PCIE_FIREWALL_CB(xdev) ? PCIE_FIREWALL_OPS(xdev)->unblock(PCIE_FIREWALL_DEV(xdev), pf, bar) : -ENODEV)
 
 #define xocl_get_buddy_fpga(lro, fn) \
-	(bus_for_each_dev(&pci_bus_type, NULL, lro, fn)) 
+	(bus_for_each_dev(&pci_bus_type, NULL, lro, fn))
 /* subdev functions */
 int xocl_subdev_init(xdev_handle_t xdev_hdl, struct pci_dev *pdev,
 	struct xocl_pci_funcs *pci_ops);

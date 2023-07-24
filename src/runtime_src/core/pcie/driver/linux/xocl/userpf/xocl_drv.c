@@ -10,10 +10,12 @@
 #include <linux/crc32c.h>
 #include <linux/iommu.h>
 #include <linux/kernel.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
 #include <linux/pagemap.h>
 #include <linux/pci.h>
 #include <linux/random.h>
+#include <linux/timer.h>
 #include <linux/version.h>
 
 #include "common.h"
@@ -746,6 +748,9 @@ static void xocl_mailbox_srv(void *arg, void *data, size_t len,
 			/* Mgmt is offline, mark peer as not ready */
 			userpf_info(xdev, "mgmt driver offline\n");
 			(void) xocl_mailbox_set(xdev, CHAN_STATE, 0);
+			xdev->core.is_mbx_version_valid = false;
+			mod_timer(&xdev->core.mgmt_status_timer,
+				  jiffies + (HZ*5));
 		} else {
 			userpf_err(xdev, "unknown peer state flag (0x%llx)\n",
 				st->state_flags);
@@ -1001,6 +1006,147 @@ failed:
 
 	return ret;
 }
+
+int xocl_vmgmt_refresh_suddevs(struct xocl_dev *xdev)
+{
+#if 1
+	/* FIXME: Temp workaround to unblock David */
+	userpf_info(xdev, "Versal Mgmt subdev refresh routine");
+	return xocl_refresh_subdevs(xdev);
+#else
+	struct xcl_subdev	*resp = NULL;
+	uint64_t checksum = 0;
+	bool offline = false;
+	int ret = 0;
+
+	store_pcie_link_info(xdev);
+
+	ret = xocl_drvinst_get_offline(xdev->core.drm, &offline);
+	if (ret == -ENODEV || offline) {
+		userpf_info(xdev, "online current devices");
+	        xocl_reset_notify(xdev->core.pdev, false);
+		xocl_drvinst_set_offline(xdev->core.drm, false);
+	}
+
+	xocl_drvinst_set_offline(xdev->core.drm, true);
+
+	/* clean up mem topology */
+	if (xdev->core.drm) {
+		xocl_drm_fini(xdev->core.drm);
+		xdev->core.drm = NULL;
+	}
+	xocl_fini_sysfs(xdev);
+
+	xocl_subdev_offline_all(xdev);
+	xocl_subdev_destroy_all(xdev);
+
+	ret = identify_bar(xdev);
+	if (ret) {
+		userpf_err(xdev, "failed to identify bar");
+		goto failed;
+	}
+
+	ret = xocl_subdev_create_all(xdev);
+	if (ret) {
+		userpf_err(xdev, "create subdev failed %d", ret);
+		goto failed;
+	}
+
+	ret = xocl_p2p_init(xdev);
+	if (ret) {
+		userpf_err(xdev, "failed to init p2p memory");
+		goto failed;
+	}
+
+	if (XOCL_DSA_IS_VERSAL_ES3(xdev)) {
+		//probe & initialize hwmon_sdm driver only on versal
+		ret = xocl_hwmon_sdm_init(xdev);
+		if (ret) {
+			userpf_err(xdev, "failed to init hwmon_sdm driver, err: %d", ret);
+			goto failed;
+		}
+	}
+
+	(void) xocl_peer_listen(xdev, xocl_mailbox_srv, (void *)xdev);
+
+	ret = xocl_init_sysfs(xdev);
+	if (ret) {
+		userpf_err(xdev, "Unable to create sysfs %d", ret);
+		goto failed;
+	}
+
+	if (!xdev->core.drm) {
+		xdev->core.drm = xocl_drm_init(xdev);
+		if (!xdev->core.drm) {
+			userpf_err(xdev, "Unable to init drm");
+			goto failed;
+		}
+	}
+
+	xocl_drvinst_set_offline(xdev->core.drm, false);
+
+failed:
+	if (!ret)
+		(void) xocl_mb_connect(xdev);
+	if (mb_req)
+		vfree(mb_req);
+	if (resp)
+		vfree(resp);
+
+	return ret;
+#endif
+}
+
+
+void xocl_poll_mgmt_status(struct work_struct *w)
+{
+	struct xocl_dev_core *xdev = container_of(w, struct xocl_dev_core,
+						  mgmt_status_poll);
+	char wq_name[15];
+	struct xcl_mailbox_info info;
+	struct xcl_mailbox_req req = {0};
+	ssize_t len = sizeof(info);
+	int ret, i;
+	struct xocl_dev *dev = pci_get_drvdata(xdev->pdev);
+
+	/* Get mailbox protocol version */
+	req.req = XCL_MAILBOX_REQ_GET_MBX_PROTOCOL_VERSION;
+	ret = xocl_peer_request(xdev, &req, sizeof(req), &info, &len, NULL,
+				NULL, 0, 0);
+	if (ret)
+		return;
+
+	userpf_info(xdev, "Mailbox protocol version: %u", info.version);
+	xdev->mbx_protocol_version = info.version;
+	xdev->is_mbx_version_valid = true;
+
+	if (info.version == 1) {
+//		(void) xocl_vmgmt_refresh_suddevs(dev);
+		return;
+	}
+
+	if (!xdev->wq) {
+		userpf_info(xdev, "Init deferred workers");
+
+		for (i = XOCL_WORK_RESET; i < XOCL_WORK_NUM; i++) {
+			INIT_DELAYED_WORK(&xdev->works[i].work, xocl_work_cb);
+			xdev->works[i].op = i;
+		}
+
+		snprintf(wq_name, sizeof(wq_name), "xocl_wq%d",
+			 xdev->dev_minor);
+		xdev->wq = create_singlethread_workqueue(wq_name);
+		if (!xdev->wq) {
+			userpf_err(xdev, "failed to create work queue");
+			return;
+		}
+	}
+
+	xocl_queue_work(xdev, XOCL_WORK_REFRESH_SUBDEV, 1);
+	/* Waiting for all subdev to be initialized before returning. */
+	flush_delayed_work(&xdev->works[XOCL_WORK_REFRESH_SUBDEV].work);
+}
+
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 13, 0)
 void user_pci_reset_prepare(struct pci_dev *pdev)
@@ -1691,12 +1837,25 @@ unlock:
 	return err;
 }
 
+void xocl_mgmt_status_timer(struct timer_list *t)
+{
+	struct xocl_dev_core *xdev = container_of(t, struct xocl_dev_core,
+						  mgmt_status_timer);
+
+	if (xdev->is_mbx_version_valid)
+		return;
+
+	schedule_work(&xdev->mgmt_status_poll);
+
+	/* Respin timer */
+	mod_timer(&xdev->mgmt_status_timer, jiffies + (HZ/10));
+}
+
 int xocl_userpf_probe(struct pci_dev *pdev,
 		const struct pci_device_id *ent)
 {
 	struct xocl_dev			*xdev;
-	char				wq_name[15];
-	int				ret, i;
+	int				ret;
 
 	xdev = xocl_drvinst_alloc(&pdev->dev, sizeof(*xdev));
 	if (!xdev) {
@@ -1734,11 +1893,6 @@ int xocl_userpf_probe(struct pci_dev *pdev,
 		return 0;
 	}
 
-	for (i = XOCL_WORK_RESET; i < XOCL_WORK_NUM; i++) {
-		INIT_DELAYED_WORK(&xdev->core.works[i].work, xocl_work_cb);
-		xdev->core.works[i].op = i;
-	}
-
 	ret = xocl_alloc_dev_minor(xdev);
 	if (ret)
 		goto failed;
@@ -1758,14 +1912,6 @@ int xocl_userpf_probe(struct pci_dev *pdev,
 	ret = xocl_p2p_init(xdev);
 	if (ret) {
 		xocl_err(&pdev->dev, "failed to init p2p memory");
-		goto failed;
-	}
-
-	snprintf(wq_name, sizeof(wq_name), "xocl_wq%d", xdev->core.dev_minor);
-	xdev->core.wq = create_singlethread_workqueue(wq_name);
-	if (!xdev->core.wq) {
-		xocl_err(&pdev->dev, "failed to create work queue");
-		ret = -EFAULT;
 		goto failed;
 	}
 
@@ -1793,9 +1939,11 @@ int xocl_userpf_probe(struct pci_dev *pdev,
 	 */
 	xdev->reset_ert_cus = true;
 
-	xocl_queue_work(xdev, XOCL_WORK_REFRESH_SUBDEV, 1);
-	/* Waiting for all subdev to be initialized before returning. */
-	flush_delayed_work(&xdev->core.works[XOCL_WORK_REFRESH_SUBDEV].work);
+	/* Create timer to poll for mgmt to come online */
+	xdev->core.is_mbx_version_valid = false;
+	timer_setup(&xdev->core.mgmt_status_timer, xocl_mgmt_status_timer, 0);
+	mod_timer(&xdev->core.mgmt_status_timer, jiffies + (HZ/10));
+	INIT_WORK(&xdev->core.mgmt_status_poll, xocl_poll_mgmt_status);
 
 	xdev->mig_cache_expire_secs = XDEV_DEFAULT_EXPIRE_SECS;
 

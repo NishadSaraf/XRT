@@ -2585,8 +2585,11 @@ static int __icap_download_bitstream_user(struct platform_device *pdev,
 
 	xocl_subdev_destroy_by_slot(xdev, slot_id);
 
+	/* workaroud 1: skip peer download */
+#if 0
 	err = __icap_peer_xclbin_download(icap, xclbin, slot_id);
-
+#endif
+	err = 0;
 	if (err)
 		goto done;
 
@@ -2632,6 +2635,7 @@ done:
 		/* Remember "this" bitstream, so avoid re-download next time. */
 		uuid_copy(&islot->icap_bitstream_uuid, &xclbin->m_header.uuid);
 	}
+
 	return err;
 }
 
@@ -2783,6 +2787,9 @@ static int icap_download_bitstream_axlf(struct platform_device *pdev,
 	islot = icap->slot_info[slot_id];
 	if (header && (bitstream || bitstream_part_pdi)) {
 		ICAP_INFO(icap, "check interface uuid");
+		
+		/* workaround 2. skip checking uuid by fdt metadata */
+#if 0
 		err = xocl_fdt_check_uuids(xdev,
 				(const void *)XDEV(xdev)->fdt_blob,
 				(const void *)((char *)xclbin +
@@ -2792,6 +2799,7 @@ static int icap_download_bitstream_axlf(struct platform_device *pdev,
 			err = -EINVAL;
 			goto done;
 		}
+#endif
 
 		/* Set this slot is as a PL Slot */
 		islot->pl_slot = true;
@@ -3162,9 +3170,11 @@ static uint64_t icap_get_data_nolock(struct platform_device *pdev,
 	uint64_t target = 0;
 
 	if (!ICAP_PRIVILEGED(icap)) {
-
+		/* workaround 3: periodic cached icap data will fail */
+#if 0
 		if (ktime_compare(now, icap->cache_expires) > 0)
 			icap_read_from_peer(pdev);
+#endif
 
 		switch (kind) {
 		case CLOCK_FREQ_0:
