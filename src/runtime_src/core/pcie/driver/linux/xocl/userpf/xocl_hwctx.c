@@ -87,13 +87,14 @@ int xocl_vmgmt_create_hw_context(struct xocl_dev *xdev, struct drm_file *filp,
 
 	hw_ctx = kds_alloc_hw_ctx(client, xclbin_id, slot_id);
 	if (!hw_ctx) {
+		userpf_err(xdev, "KDS failed to alloc hw ctx");
 		ret = -EINVAL;
-		goto error_out;
+		goto exit;
 	}
 
 	hw_ctx_args->hw_context = hw_ctx->hw_ctx_idx;
 
-error_out:
+exit:
 	mutex_unlock(&client->lock);
 	return ret;
 }
@@ -139,11 +140,13 @@ xocl_cu_ctx_to_info(struct xocl_dev *xdev, struct drm_xocl_open_cu_ctx *cu_args,
         strcpy(kname, strsep(&kname_p, ":"));
         strcpy(iname, strsep(&kname_p, ":"));
 
+	userpf_info(xdev, "%d", __LINE__);
         /* Retrieve the CU index from the given slot */
         for (i = 0; i < MAX_CUS; i++) {
                 xcu = kds->cu_mgmt.xcus[i];
                 if (!xcu)
                         continue;
+	userpf_info(xdev, "%d", __LINE__);
 
                 if ((xcu->info.slot_idx == slot_hndl) &&
                                 (!strcmp(xcu->info.kname, kname)) &&
@@ -154,12 +157,14 @@ xocl_cu_ctx_to_info(struct xocl_dev *xdev, struct drm_xocl_open_cu_ctx *cu_args,
                 }
         }
 
+	userpf_info(xdev, "%d", __LINE__);
         /* Retrieve the SCU index from the given slot */
         for (i = 0; i < MAX_CUS; i++) {
                 xcu = kds->scu_mgmt.xcus[i];
                 if (!xcu)
                         continue;
 
+	userpf_info(xdev, "%d", __LINE__);
                 if ((xcu->info.slot_idx == slot_hndl) &&
                                 (!strcmp(xcu->info.kname, kname)) &&
                                 (!strcmp(xcu->info.iname, iname))) {
@@ -169,6 +174,7 @@ xocl_cu_ctx_to_info(struct xocl_dev *xdev, struct drm_xocl_open_cu_ctx *cu_args,
                 }
         }
 
+	userpf_info(xdev, "%d", __LINE__);
         return -EINVAL;
 
 done:
@@ -178,6 +184,7 @@ done:
         else
                 cu_info->flags = CU_CTX_SHARED;
 
+	userpf_info(xdev, "%d", __LINE__);
         return 0;
 }
 

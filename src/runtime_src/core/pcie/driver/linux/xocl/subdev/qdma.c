@@ -918,9 +918,13 @@ static int qdma_remove(struct platform_device *pdev)
 	for (i = 0; i < ARRAY_SIZE(qdma->user_msix_table); i++) {
 		irq_entry = &qdma->user_msix_table[i];
 		if (irq_entry->in_use) {
-			if (irq_entry->enabled)
+			if (irq_entry->enabled) {
 				xocl_err(&pdev->dev,
 					"ERROR: Interrupt %d is still on", i);
+				xocl_info(&pdev->dev, "Forcing user IRQ unregistration");
+				user_intr_unreg(pdev, i);
+			}
+
 			if(!IS_ERR_OR_NULL(irq_entry->event_ctx))
 				eventfd_ctx_put(irq_entry->event_ctx);
 		}

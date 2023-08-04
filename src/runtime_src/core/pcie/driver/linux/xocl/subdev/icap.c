@@ -227,7 +227,7 @@ static void icap_probe_urpdev(struct platform_device *pdev, struct axlf *xclbin,
 static int icap_slot_init(struct icap *icap, uint32_t slot_id)
 {
 	struct islot_info *islot = icap->slot_info[slot_id];
-	
+
 	mutex_lock(&icap->icap_lock);
 	if (islot) {
 		vfree(islot);
@@ -240,7 +240,7 @@ static int icap_slot_init(struct icap *icap, uint32_t slot_id)
 		ICAP_ERR(icap, "Memory allocation failure");
 		return -ENOMEM;
 	}
-	
+
 	init_waitqueue_head(&islot->reader_wq);
 	islot->slot_idx = slot_id;
 	islot->pl_slot = false;
@@ -578,7 +578,7 @@ static unsigned int icap_get_clock_frequency_counter_khz(const struct icap *icap
 	}
 
 	/* No PL Slot found. Returning from here */
-	if (slot_id == MAX_SLOT_SUPPORT) 
+	if (slot_id == MAX_SLOT_SUPPORT)
 		return 0;
 
 	if (ICAP_PRIVILEGED(icap)) {
@@ -614,7 +614,7 @@ static void xclbin_get_ocl_frequency_max_min(struct icap *icap,
 
 	if (!islot)
 		return;
-		
+
 	if (!uuid_is_null(&islot->icap_bitstream_uuid)) {
 		topology = islot->xclbin_clock_freq_topology;
 		if (!topology)
@@ -812,11 +812,11 @@ static inline bool mig_calibration_done(struct icap *icap)
 static int calibrate_mig(struct icap *icap, uint32_t slot_id)
 {
 	int i;
-	struct mem_topology *mem_topo = NULL; 
+	struct mem_topology *mem_topo = NULL;
 	struct islot_info *islot = icap->slot_info[slot_id];
 	/* Check for any DDR or PLRAM banks that are in use */
 	bool is_memory_bank_connected = false;
-	
+
 	if (!islot)
 		return -EINVAL;
 
@@ -880,7 +880,7 @@ static int icap_cache_clock_freq_topology(struct icap *icap,
 	/* Can't find CLOCK_FREQ_TOPOLOGY, just return*/
 	if (!hdr)
 		return 0;
-		
+
 	if (!islot)
 		return -EINVAL;
 
@@ -1161,11 +1161,11 @@ static int icap_download_boot_firmware(struct platform_device *pdev)
 
 	if (xocl_mb_sched_on(xdev)) {
 		const char *sched_bin = XDEV(xdev)->priv.sched_bin;
-		char bin[32] = {0}; 
+		char bin[32] = {0};
 
-		/* Try locating the microblaze binary. 
+		/* Try locating the microblaze binary.
 		 * For dynamic platforms like 1RP or 2RP, we load the ert fw
-		 * under /lib/firmware/xilinx regardless there is an ert fw 
+		 * under /lib/firmware/xilinx regardless there is an ert fw
 		 * in partition.xsabin or not
 		 */
 
@@ -2149,7 +2149,7 @@ static void icap_save_calib(struct icap *icap, uint32_t slot_id)
 	mem_topo = icap->slot_info[slot_id]->mem_topo;
 	if (!mem_topo)
 		return;
-		
+
 	for (i = 0; i < mem_topo->m_count; ++i) {
 		if (convert_mem_tag(mem_topo->m_mem_data[i].m_tag) != MEM_TAG_DDR)
 			continue;
@@ -2273,7 +2273,7 @@ static int icap_calibrate_mig(struct platform_device *pdev, uint32_t slot_id)
 static int icap_calib_and_check(struct platform_device *pdev, uint32_t slot_id)
 {
 	struct icap *icap = platform_get_drvdata(pdev);
-	
+
 	BUG_ON(!mutex_is_locked(&icap->icap_lock));
 
 	if (icap->data_retention)
@@ -2752,7 +2752,7 @@ static int icap_download_bitstream_axlf(struct platform_device *pdev,
 	const void *bitstream = NULL;
 	const void *bitstream_part_pdi = NULL;
 
-	/* This is the first entry for slot in icap. 
+	/* This is the first entry for slot in icap.
 	 * Hence allocate required memory here
 	 */
 	err = icap_slot_init(icap, slot_id);
@@ -2787,7 +2787,7 @@ static int icap_download_bitstream_axlf(struct platform_device *pdev,
 	islot = icap->slot_info[slot_id];
 	if (header && (bitstream || bitstream_part_pdi)) {
 		ICAP_INFO(icap, "check interface uuid");
-		
+
 		/* workaround 2. skip checking uuid by fdt metadata */
 #if 0
 		err = xocl_fdt_check_uuids(xdev,
@@ -2823,12 +2823,14 @@ static int icap_download_bitstream_axlf(struct platform_device *pdev,
 		err = -EINVAL;
 		goto done;
 	}
+	/* FIXME: Skip below check for versal-mgmt, for now
 	if (!xocl_verify_timestamp(xdev,
 		xclbin->m_header.m_featureRomTimeStamp)) {
 		ICAP_ERR(icap, "TimeStamp of ROM did not match Xclbin");
 		err = -EOPNOTSUPP;
 		goto done;
 	}
+	*/
 	if (icap_bitstream_in_use(icap, slot_id)) {
 		ICAP_ERR(icap, "bitstream is in-use, can't change");
 		err = -EBUSY;
@@ -3140,7 +3142,7 @@ static int icap_cache_bitstream_axlf_section(struct platform_device *pdev,
 				&(mem_topo->m_mem_data[i].m_size),
 				&(mem_topo->m_mem_data[i].m_used));
 		}
-		/* Xclbin binary has been adjusted as a workaround of Bios Limitation of some machine 
+		/* Xclbin binary has been adjusted as a workaround of Bios Limitation of some machine
 		 * We won't be able to retain the device memory because of the limitation
 		 */
 		xocl_p2p_adjust_mem_topo(xdev, mem_topo);
@@ -3820,7 +3822,7 @@ static ssize_t icap_read_debug_ip_layout(struct file *filp, struct kobject *kobj
                 f_nread += nread;
 		icap_xclbin_rd_unlock(icap, st);
 	}
-	
+
 	return f_nread;
 }
 static struct bin_attribute debug_ip_layout_attr = {
@@ -3872,7 +3874,7 @@ static ssize_t icap_read_ip_layout(struct file *filp, struct kobject *kobj,
                 f_nread += nread;
 		icap_xclbin_rd_unlock(icap, st);
 	}
-	
+
 	return f_nread;
 }
 
@@ -3927,7 +3929,7 @@ static ssize_t icap_read_ps_kernel(struct file *filp, struct kobject *kobj,
 		f_nread += nread;
 		icap_xclbin_rd_unlock(icap, st);
 	}
-	
+
 	return f_nread;
 }
 
@@ -4035,7 +4037,7 @@ static ssize_t icap_read_group_connectivity(struct file *filp, struct kobject *k
 		f_nread += nread;
 		icap_xclbin_rd_unlock(icap, st);
 	}
-	
+
 	return f_nread;
 }
 
@@ -4083,7 +4085,7 @@ static ssize_t icap_read_mem_topology(struct file *filp, struct kobject *kobj,
 		}
 
 		mem_topo = vzalloc(size);
-		if (!mem_topo) { 
+		if (!mem_topo) {
 			icap_xclbin_rd_unlock(icap, st);
 			vfree(mem_topo);
 			return f_nread;
@@ -4110,7 +4112,7 @@ static ssize_t icap_read_mem_topology(struct file *filp, struct kobject *kobj,
 		icap_xclbin_rd_unlock(icap, st);
 		vfree(mem_topo);
 	}
-			
+
 	return f_nread;
 }
 
@@ -4187,7 +4189,7 @@ static ssize_t icap_read_group_topology(struct file *filp, struct kobject *kobj,
 		icap_xclbin_rd_unlock(icap, st);
 		vfree(group_topo);
 	}
-			
+
 	return f_nread;
 }
 
@@ -4479,7 +4481,7 @@ static ssize_t icap_write_rp(struct file *filp, const char __user *data,
 	ssize_t ret, len;
 	int err;
 	const char *sched_bin = XDEV(xdev)->priv.sched_bin;
-	char bin[32] = {0}; 
+	char bin[32] = {0};
 
 	mutex_lock(&icap->icap_lock);
 	if (icap->rp_fdt) {
@@ -4641,9 +4643,9 @@ static ssize_t icap_write_rp(struct file *filp, const char __user *data,
 		memcpy(icap->rp_mgmt_bin, header, section->m_sectionSize);
 		icap->rp_mgmt_bin_len = section->m_sectionSize;
 	}
-	/* Try locating the microblaze binary. 
+	/* Try locating the microblaze binary.
 	 * For dynamic platforms like 1RP or 2RP, we load the ert fw
-	 * under /lib/firmware/xilinx regardless there is an ert fw 
+	 * under /lib/firmware/xilinx regardless there is an ert fw
 	 * in partition.xsabin or not
 	 */
 	if (!sched_bin) {
