@@ -513,11 +513,10 @@ xocl_resolver(struct xocl_dev *xdev, struct axlf *axlf, xuid_t *xclbin_id,
                                 } else {
                                         DRM_WARN("%s Force xclbin download", __func__);
 				        *slot_id = s_id;
-                                } 
+                                }
 			} else {
 				/* workaround 4: this is needed but why? */
 				*slot_id = s_id;
-				printk("DZ_ resolver need to set s_id \n");
 				ret = -EEXIST;
 				goto done;
 			}
@@ -536,7 +535,6 @@ xocl_resolver(struct xocl_dev *xdev, struct axlf *axlf, xuid_t *xclbin_id,
 				DRM_WARN("%s Force xclbin download to slot %d", __func__, s_id);
 			} else {
 				*slot_id = existing_slot_id;
-				printk("DZ_ resolver 2\n");
 				ret = -EEXIST;
 				goto done;
 			}

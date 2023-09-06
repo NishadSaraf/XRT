@@ -116,7 +116,7 @@ int xocl_destroy_hw_context(struct xocl_dev *xdev, struct drm_file *filp,
         }
 
 	/* Unlock the bitstream for this HW context if no reference is there */
-//	(void)xocl_icap_unlock_bitstream(xdev, hw_ctx->xclbin_id, hw_ctx->slot_idx);
+	(void)xocl_icap_unlock_bitstream(xdev, hw_ctx->xclbin_id, hw_ctx->slot_idx);
 
 	ret = kds_free_hw_ctx(client, hw_ctx);
 
