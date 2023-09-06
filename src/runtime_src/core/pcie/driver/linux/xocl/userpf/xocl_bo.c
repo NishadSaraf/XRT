@@ -285,14 +285,12 @@ static inline int check_bo_user_reqs(const struct drm_device *dev,
 	struct xocl_icap_funcs *icap_ops;
 	struct xocl_dev_core *core = &xdev->core;
 
-	userpf_info(xdev, "%d", __LINE__);
 	if (type == XOCL_BO_EXECBUF || type == XOCL_BO_IMPORT ||
 	    type == XOCL_BO_CMA)
 		return 0;
 	//From "mem_topology" or "feature rom" depending on
 	//unified or non-unified dsa
 
-	userpf_info(xdev, "%d", __LINE__);
 	if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
 	    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
 		icap_ops = XOCL_GET_DRV_PRI(core->icap_platdev)->ops;
@@ -305,20 +303,17 @@ static inline int check_bo_user_reqs(const struct drm_device *dev,
 	if (err)
 		return err;
 
-	userpf_info(xdev, "%d", __LINE__);
 	if (topo) {
 		if (XOCL_IS_PS_KERNEL_MEM(topo, ddr)) {
 			err = 0;
 			goto done;
 		}
-	userpf_info(xdev, "%d", __LINE__);
 
 		if (XOCL_IS_STREAM(topo, ddr)) {
 			userpf_err(xdev, "Bank %d is Stream", ddr);
 			err = -EINVAL;
 			goto done;
 		}
-	userpf_info(xdev, "%d", __LINE__);
 		if (!XOCL_IS_DDR_USED(topo, ddr)) {
 			userpf_err(xdev,
 				   "Bank %d is marked as unused in axlf", ddr);
@@ -327,16 +322,13 @@ static inline int check_bo_user_reqs(const struct drm_device *dev,
 		}
 	}
 
-	userpf_info(xdev, "%d", __LINE__);
 	ddr_count = XOCL_DDR_COUNT(xdev, slot_id);
 	if (ddr_count == 0)
 		return -EINVAL;
 
-	userpf_info(xdev, "%d", __LINE__);
 	if (ddr >= ddr_count)
 		return -EINVAL;
 
-	userpf_info(xdev, "%d", __LINE__);
 done:
 	if (core->icap_platdev && XOCL_GET_DRV_PRI(core->icap_platdev) &&
 	    XOCL_GET_DRV_PRI(core->icap_platdev)->ops) {
@@ -413,25 +405,21 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 	bool xobj_inited = false;
 	int err = 0;
 
-	userpf_info(xdev, "%d", __LINE__);
 	BO_DEBUG("New create bo flags:%x, type %x", user_flags, bo_type);
 	if (!size)
 		return ERR_PTR(-EINVAL);
 
-	userpf_info(xdev, "%d", __LINE__);
 	/* Either none or only one DDR should be specified */
 	/* Check the bo_type */
 	if (check_bo_user_reqs(dev, user_flags, bo_type))
 		return ERR_PTR(-EINVAL);
 
-	userpf_info(xdev, "%d", __LINE__);
 	xobj = kzalloc(sizeof(*xobj), GFP_KERNEL);
 	if (!xobj)
 		return ERR_PTR(-ENOMEM);
 
 	BO_ENTER("xobj %p", xobj);
 
-	userpf_info(xdev, "%d", __LINE__);
 	xobj->user_flags = user_flags;
 	xobj->flags = bo_type;
 	mutex_lock(&drm_p->mm_lock);
@@ -447,14 +435,11 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 		}
 		memidx = drm_p->cma_bank_idx;
 	}
-	userpf_info(xdev, "%d", __LINE__);
 
 #if 1
 	if (memidx == drm_p->cma_bank_idx) {
-	userpf_info(xdev, "%d", __LINE__);
 		if (xobj->flags &
 		    (XOCL_USER_MEM | XOCL_DRM_IMPORT | XOCL_P2P_MEM)) {
-	userpf_info(xdev, "%d", __LINE__);
 			err = -EINVAL;
 			xocl_xdev_err(xdev, "invalid HOST BO req. flag %x",
 				xobj->flags);
@@ -464,7 +449,6 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 	}
 #endif
 	if (xobj->flags == XOCL_BO_EXECBUF) {
-		userpf_info(xdev, "%d", __LINE__);
 		xobj->metadata.state = DRM_XOCL_EXECBUF_STATE_ABORT;
 	}
 
@@ -473,9 +457,7 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 	obj->funcs = &xocl_gem_object_funcs;
 #endif
 
-	userpf_info(xdev, "%d", __LINE__);
 	if (xobj->flags & XOCL_DRM_SHMEM) {
-		userpf_info(xdev, "%d", __LINE__);
 		err = drm_gem_object_init(dev, obj, size);
 		if (err)
 			goto failed;
@@ -483,7 +465,6 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 		drm_gem_private_object_init(dev, obj, size);
 
 	xobj_inited = true;
-	userpf_info(xdev, "%d", __LINE__);
 
 	if (!(xobj->flags & XOCL_DEVICE_MEM) && !(xobj->flags & XOCL_CMA_MEM))
 		goto done;
@@ -495,7 +476,6 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 		goto failed;
 	}
 
-	userpf_info(xdev, "%d", __LINE__);
 	/* Attempt to allocate buffer on the requested DDR */
 	xocl_xdev_info(xdev, "alloc bo from bank%u, flag %x, host bank %d",
 		memidx, xobj->flags, drm_p->cma_bank_idx);
@@ -504,13 +484,11 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 		xobj->base.size);
 	if (err)
 		goto failed;
-	userpf_info(xdev, "%d", __LINE__);
 
 	BO_DEBUG("insert mm_node:%p, start:%llx size: %llx",
 		xobj->mm_node, xobj->mm_node->start,
 		xobj->mm_node->size);
 	xocl_bo_update_usage_stat(drm_p, xobj->flags, xobj->base.size, 1);
-	userpf_info(xdev, "%d", __LINE__);
 
 done:
 	mutex_unlock(&drm_p->mm_lock);
