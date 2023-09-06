@@ -2586,7 +2586,7 @@ static int __icap_download_bitstream_user(struct platform_device *pdev,
 	xocl_subdev_destroy_by_slot(xdev, slot_id);
 
 	/* workaroud 1: skip peer download */
-#if 0
+#if 1
 	err = __icap_peer_xclbin_download(icap, xclbin, slot_id);
 #endif
 	err = 0;

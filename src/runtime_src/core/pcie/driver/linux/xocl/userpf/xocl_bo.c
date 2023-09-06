@@ -477,7 +477,7 @@ static struct drm_xocl_bo *xocl_create_bo(struct drm_device *dev,
 	}
 
 	/* Attempt to allocate buffer on the requested DDR */
-	xocl_xdev_info(xdev, "alloc bo from bank%u, flag %x, host bank %d",
+	xocl_xdev_dbg(xdev, "alloc bo from bank%u, flag %x, host bank %d",
 		memidx, xobj->flags, drm_p->cma_bank_idx);
 
 	err = xocl_mm_insert_node(drm_p, memidx, slotidx, xobj,
