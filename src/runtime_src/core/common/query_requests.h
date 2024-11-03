@@ -1159,11 +1159,11 @@ struct hw_context_info : request
    * A structure to represent a single hardware context on any device type. This
    * structure must contain all data that makes up a hardware context across
    * all device types.
-   * 
+   *
    * The only field that must be populated is the xclbin uuid.
    * All other fields can be populated as required by the appropriate device.
    * As new compute types are created they must be accounted for here
-   * 
+   *
    * For example:
    *  Alveo -> populate only the PL compute units
    *  Versal -> populate PL and PS compute units
@@ -1189,7 +1189,7 @@ struct hw_context_memory_info : request
 {
   /**
    * A structure to represent a single hardware context's memory contents on
-   * any device type. This structure contains all data that makes up a 
+   * any device type. This structure contains all data that makes up a
    * hardware context memory structure across all device types.
    */
   struct data {
@@ -1767,6 +1767,7 @@ struct aie_partition_info : request
     hw_context_info::metadata metadata;
     uint64_t    start_col;
     uint64_t    num_cols;
+    uint32_t    user_tid;
     int         pid;
     bool        is_suspended;
     uint64_t    instruction_mem;
@@ -1793,6 +1794,7 @@ struct aie_partition_info : request
         return "Realtime";
       case 384: //0x180
         return "High";
+      case 0:
       case 512: //0x200
         return "Normal";
       case 640: //0x280
