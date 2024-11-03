@@ -33,6 +33,7 @@ populate_aie_partition(const xrt_core::device* device)
     boost::property_tree::ptree pt_entry;
     pt_entry.put("pid", entry.pid);
     pt_entry.put("context_id", entry.metadata.id);
+    pt_entry.put("user_tid", entry.user_tid);
     pt_entry.put("status", entry.is_suspended ? "Idle" : "Active");
     pt_entry.put("instr_bo_mem", entry.instruction_mem);
     pt_entry.put("command_submissions", entry.command_submissions);
@@ -65,17 +66,17 @@ populate_aie_partition(const xrt_core::device* device)
 
 void
 ReportAiePartitions::
-getPropertyTreeInternal(const xrt_core::device* _pDevice, 
+getPropertyTreeInternal(const xrt_core::device* _pDevice,
                         boost::property_tree::ptree &_pt) const
 {
-  // Defer to the 20202 format.  If we ever need to update JSON data, 
+  // Defer to the 20202 format.  If we ever need to update JSON data,
   // Then update this method to do so.
   getPropertyTree20202(_pDevice, _pt);
 }
 
-void 
+void
 ReportAiePartitions::
-getPropertyTree20202(const xrt_core::device* _pDevice, 
+getPropertyTree20202(const xrt_core::device* _pDevice,
                      boost::property_tree::ptree &_pt) const
 {
   boost::property_tree::ptree pt;
@@ -84,7 +85,7 @@ getPropertyTree20202(const xrt_core::device* _pDevice,
   _pt.add_child("aie_partitions", pt);
 }
 
-void 
+void
 ReportAiePartitions::
 writeReport(const xrt_core::device* /*_pDevice*/,
             const boost::property_tree::ptree& _pt,
@@ -113,6 +114,7 @@ writeReport(const xrt_core::device* /*_pDevice*/,
 
     const std::vector<Table2D::HeaderData> table_headers = {
       {"PID", Table2D::Justification::left},
+      {"User Task ID", Table2D::Justification::left},
       {"Ctx ID", Table2D::Justification::left},
       {"Status", Table2D::Justification::left},
       {"Instr BO", Table2D::Justification::left},
@@ -134,6 +136,7 @@ writeReport(const xrt_core::device* /*_pDevice*/,
 
       const std::vector<std::string> entry_data = {
         hw_context.get<std::string>("pid"),
+        hw_context.get<std::string>("user_tid"),
         hw_context.get<std::string>("context_id"),
         hw_context.get<std::string>("status"),
         xrt_core::utils::unit_convert(hw_context.get<uint64_t>("instr_bo_mem")),
